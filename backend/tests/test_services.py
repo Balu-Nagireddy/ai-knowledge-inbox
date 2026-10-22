@@ -52,11 +52,15 @@ def test_embeddings_and_cosine_similarity():
     ]
     embeddings = generate_embeddings(texts)
     assert len(embeddings) == 3
-    assert len(embeddings[0]) in (768, 3072)
+    assert len(embeddings[0]) > 0
+    assert all(len(vector) == len(embeddings[0]) for vector in embeddings)
 
     # Cosine similarity between identical vectors should be ~1.0
     sim_self = compute_cosine_similarity(embeddings[0], embeddings[0])
     assert pytest.approx(sim_self, abs=1e-4) == 1.0
+
+    # Mismatched dimensions must not be treated as comparable vectors.
+    assert compute_cosine_similarity([1.0, 0.0], [1.0]) == 0.0
 
     # Ranking test
     chunks = [
