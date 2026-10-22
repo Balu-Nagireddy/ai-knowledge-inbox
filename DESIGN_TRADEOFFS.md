@@ -73,7 +73,7 @@ The fetcher uses HTTPX with a timeout and manually follows a bounded number of r
 
 The current parser uses pypdf for PDFs and python-docx for DOCX paragraphs. It decodes a set of text-like extensions including Markdown, TXT, CSV, JSON, Python, JavaScript, and HTML; for other extensions, it may also attempt a generic text decode.
 
-**Tradeoff:** this keeps dependencies and setup small, but it is not a strict upload policy. Uploaded bytes are read into memory, and no explicit file-size, batch-size, per-user quota, or decompression/resource limit is enforced.
+**Tradeoff:** this keeps dependencies and setup small, but it is not a strict upload policy. The API now caps each upload at 10 MiB and each batch at 10 files, and uses a bounded read for individual files. It still lacks a total batch-byte budget, per-user quota, strict content-type/signature validation, and parser resource isolation.
 
 **Next step:** define an explicit extension and MIME allowlist, validate signatures where practical, enforce request and per-file byte limits, cap batch count and total extracted characters, and isolate parser workloads if the service is exposed to untrusted uploads. Image-only PDFs need OCR, which is not currently implemented.
 
@@ -255,7 +255,7 @@ These items are blockers before exposing the service to the public internet or u
 | No tenant isolation | All items share one logical collection | Add tenant/user scoping to every read, query, and mutation |
 | CORS | Configurable allowlist defaults to local Vite origins; credentials disabled | Set exact deployed frontend origins and review required methods |
 | SSRF | URL and redirect destinations are validated against public IP ranges; redirects are bounded | Add network egress controls/fetch proxy and test DNS rebinding and deployment-specific routing |
-| Upload resource exhaustion | Entire upload read into memory; no explicit size/count cap | Enforce byte limits, file allowlist, batch limits, quotas, and parser resource limits |
+| Upload resource exhaustion | 10 MiB per file, max 10 files per batch, bounded per-file reads | Add total batch-byte budget, strict file allowlist, quotas, and parser resource limits |
 | Prompt injection | Retrieved content is included in the LLM prompt | Delimit and treat documents as untrusted, separate instructions from data, test adversarial inputs |
 | Secrets | API key comes from environment | Keep secrets out of Git/logs; use deployment secrets and rotate exposed keys |
 | Logging/privacy | Request/query information is logged | Avoid logging sensitive raw content; define retention and access rules |
@@ -336,7 +336,7 @@ For asynchronous ingestion, a job-based interface could return `202 Accepted` wi
 
 The current design prioritizes **simple local setup, clear module boundaries, and an inspectable RAG workflow** over scale and security hardening. That is an appropriate prototype tradeoff when its boundaries are explicit.
 
-The most important near-term actions are not to add Kubernetes, Redis, or a vector database immediately. The embedding comparison and fixed-dimension test mismatch have been corrected; CORS is configurable and URL destination checks are in place. Remaining priorities are network-level SSRF protection, upload/response size limits, targeted redirect and abuse tests, and retrieval-quality evaluation. Infrastructure changes should follow demonstrated needs.
+The most important near-term actions are not to add Kubernetes, Redis, or a vector database immediately. The embedding comparison and fixed-dimension test mismatch have been corrected; CORS is configurable, URL destination checks are in place, upload limits are enforced, and SQLite startup recursion has been fixed. Remaining priorities are network-level SSRF protection, a total batch-byte budget, targeted redirect/abuse tests, and retrieval-quality evaluation. Infrastructure changes should follow demonstrated needs.
 
 ## 13. Local setup, licensing, and CI
 
