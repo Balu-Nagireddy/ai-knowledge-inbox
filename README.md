@@ -8,6 +8,8 @@ The project combines a **FastAPI** backend, a **React + Vite** frontend, **SQLit
 
 ## Contents
 
+- [Assignment fit](#assignment-fit)
+
 - [Features](#features)
 - [How it works](#how-it-works)
 - [Technology stack](#technology-stack)
@@ -145,6 +147,27 @@ ai-knowledge-inbox/
 └── DESIGN_TRADEOFFS.md
 ```
 
+## Assignment fit
+
+The project covers the assignment's core requirements:
+
+| Requirement | Current implementation |
+|---|---|
+| Save plain text notes and URLs | `POST /ingest` |
+| Store raw content and metadata | SQLite `items` table stores extracted content, type, URL/filename, title, and timestamp |
+| Chunk, embed, retrieve top chunks | Recursive chunking, Gemini/fallback vectors, cosine + lexical ranking |
+| LLM answer with cited sources | `POST /query` and source snippets; answer grounding is prompt-based, not guaranteed |
+| React interface | Note/URL/file capture, inbox list, question UI, citations |
+| Required API contract | `POST /ingest`, `GET /items`, `POST /query` are present |
+| Tradeoff analysis | [DESIGN_TRADEOFFS.md](./DESIGN_TRADEOFFS.md) |
+| Structured logging and validation | Logging setup and Pydantic request schemas are present |
+
+The app goes beyond the minimum with file uploads, batch ingestion, SSE streaming, deletion, and opt-in web-assisted queries. These extras are not required for the assignment and should not compromise the reliability of the core note/URL-to-RAG path.
+
+### Current readiness
+
+**Assignment scope: substantially implemented; validation is in progress.** The core feature set is present, and the current changes add safer CORS defaults, URL destination checks, compatible setup scripts, embedding-dimension handling, and CI. A successful local test/build run or passing GitHub Actions run is still required before claiming the repository is fully verified.
+
 ## Requirements
 
 - Python 3.10 or newer (Python 3.12 is a reasonable baseline for this project)
@@ -154,6 +177,22 @@ ai-knowledge-inbox/
 - Internet access for Gemini calls, URL ingestion, and web-assisted queries
 
 ## Run locally
+
+### Recommended one-time setup
+
+**Windows (Command Prompt or PowerShell):**
+
+```bat
+setup.bat
+```
+
+**macOS / Linux (Bash):**
+
+```bash
+bash setup.sh
+```
+
+The setup scripts create `backend/.venv`, install Python requirements, create `backend/.env` if missing, and install frontend dependencies using `npm ci` when a lockfile exists. Setup does not require a Gemini key; add one to `backend/.env` to enable live Gemini generation.
 
 Run the backend and frontend in separate terminals from the repository root.
 
@@ -223,9 +262,12 @@ Restart Vite after changing frontend environment variables.
 
 ### 3. Optional launcher scripts
 
-The `run_backend.bat` script assumes an environment at `backend/venv`. The manual setup above creates `backend/.venv`, so either update the launcher to match your chosen environment directory or use the manual command.
+The launchers have been aligned with the setup scripts and use `backend/.venv`. On Windows, use the `.bat` files from Command Prompt or PowerShell. On macOS/Linux, use the `.sh` files from Bash. The shell scripts are not intended to run under Windows' native Command Prompt; use Git Bash/WSL only if your Python virtual environment is created for that environment.
 
-The checked-in `run_backend.sh` currently refers to `venv/Scripts/python`, which is a Windows-style path and is not a portable macOS/Linux launcher. Use the manual commands above on Unix-like systems unless that script is corrected.
+- Backend: `run_backend.bat` or `bash run_backend.sh`
+- Frontend: `run_frontend.bat` or `bash run_frontend.sh`
+
+The two services run in separate terminals. The scripts fail early with a useful message if dependencies are missing.
 
 ## Configuration
 
@@ -243,6 +285,7 @@ Settings are loaded from `backend/.env` and can also be supplied as environment 
 | `HOST` | `127.0.0.1` | Host setting in configuration; launcher/manual commands must explicitly use the intended host. |
 | `PORT` | `8000` | Port setting in configuration; launcher/manual commands must explicitly use the intended port. |
 | `LOG_LEVEL` | `INFO` | Log-level setting. |
+| `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated list of allowed frontend origins. Set the exact deployed frontend origin when hosting. |
 
 Do not commit `backend/.env`, API keys, or real user documents. Use secret management rather than checked-in environment files for any hosted deployment.
 
@@ -343,21 +386,23 @@ It attempts to discover and fetch up to two public web pages, ingests fetched te
 
 ## Testing
 
-From the repository root:
+Run locally from the repository root:
 
 ```bash
 cd backend
 python -m pytest
 ```
 
-The test suite covers API health, note ingestion/query/deletion, validation errors, streaming response headers, file and batch ingestion, SQLite item/chunk lifecycle, note-title handling, text chunking, and embedding/ranking behavior.
+The test suite covers API health, note ingestion/query/deletion, validation errors, streaming response headers, file and batch ingestion, SQLite lifecycle, note-title handling, chunking, embeddings, ranking, and unsafe URL rejection.
 
-**Current test caveat:** `backend/tests/test_services.py` expects the fallback embedding vector length to be 768, but `backend/app/services/embeddings.py` creates fallback vectors with a default length of 3072. The embedding model's returned dimension may also differ from the fallback dimension. Run the suite in your environment and resolve this mismatch before treating the suite as green. The repository was reviewed statically for this README; the test suite was not executed as part of this documentation update.
+The test no longer hard-codes an embedding dimension. Vector similarity now returns zero for mismatched dimensions, and retrieval does not pad/truncate vectors across embedding spaces. This avoids invalid comparisons but does not automatically re-embed old data: if switching between Gemini and fallback embeddings, delete/rebuild the local index before relying on vector ranking. Lexical ranking can still contribute when vectors are incompatible.
+
+A GitHub Actions workflow in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) installs backend dependencies, runs pytest without a Gemini key, and builds the frontend. Check the Actions tab for the actual run status. Do not treat the workflow as passing until GitHub reports both jobs successful.
 
 ## Known limitations and security notes
 
 - **Single-user/local-first:** there is no authentication, authorization, per-user data isolation, or tenant model.
-- **Broad CORS:** the API currently allows all origins, methods, and headers while also enabling credentials. Restrict origins and methods before any deployment.
+- **CORS:** allowed origins are now configurable through `CORS_ORIGINS` and default to the two local Vite origins; credentials are disabled. Configure the exact production frontend origin before deployment.
 - **URL fetching and SSRF:** scheme checks do not block loopback, private-network, link-local, or cloud metadata targets; redirects can also change destinations. Do not expose URL ingestion or web search to untrusted clients until network-level URL validation and redirect checks are implemented.
 - **Uploads:** the current API reads uploaded bytes into memory and has no explicit size/count limits. Add size limits, extension/content validation, and resource quotas.
 - **External dependencies:** content fetching, web search, Gemini API quotas, and model availability can fail or change.
@@ -366,7 +411,7 @@ The test suite covers API health, note ingestion/query/deletion, validation erro
 - **Retrieval scalability:** each query loads all chunks from SQLite and ranks them in-process. There is no ANN index, background queue, or semantic cache.
 - **SQLite concurrency:** suitable for a small local workload, but concurrent writes and multi-process deployments need careful handling.
 - **Document extraction:** image-only PDFs and complex page layouts may need OCR or a more capable extraction pipeline.
-- **Operational controls:** production use needs explicit limits, authentication, tighter error responses, metrics/tracing, backups, and a deployment strategy for persistent storage.
+- **Operational controls:** production use still needs authentication if exposed beyond a trusted single-user environment, upload/request size limits, rate limiting, metrics/tracing, backups, and a persistent-storage deployment strategy.
 
 ## Design decisions
 
@@ -382,4 +427,4 @@ In short:
 
 ## License
 
-No license file is currently present in the repository. Unless a license is added, treat the repository as having all rights reserved rather than assuming it is open source.
+This repository is licensed under the [MIT License](./LICENSE).
