@@ -192,7 +192,7 @@ setup.bat
 bash setup.sh
 ```
 
-The setup scripts create `backend/.venv`, install Python requirements, create `backend/.env` if missing, and install frontend dependencies using `npm ci` when a lockfile exists. Setup does not require a Gemini key; add one to `backend/.env` to enable live Gemini generation.
+The setup scripts create `backend/.venv`, install Python requirements, create `backend/.env` if missing, and install frontend dependencies using `npm ci` when a lockfile exists. The SQLite initialization path was also fixed to avoid recursive initialization when the database file is new. Setup does not require a Gemini key; add one to `backend/.env` to enable live Gemini generation.
 
 Run the backend and frontend in separate terminals from the repository root.
 
@@ -393,7 +393,7 @@ cd backend
 python -m pytest
 ```
 
-The test suite covers API health, note ingestion/query/deletion, validation errors, streaming response headers, file and batch ingestion, SQLite lifecycle, note-title handling, chunking, embeddings, ranking, and unsafe URL rejection.
+The test suite covers API health, note ingestion/query/deletion, validation errors, streaming response headers, file and batch ingestion, oversized upload rejection, SQLite lifecycle, note-title handling, chunking, embeddings, ranking, and unsafe URL rejection.
 
 The test no longer hard-codes an embedding dimension. Vector similarity now returns zero for mismatched dimensions, and retrieval does not pad/truncate vectors across embedding spaces. This avoids invalid comparisons but does not automatically re-embed old data: if switching between Gemini and fallback embeddings, delete/rebuild the local index before relying on vector ranking. Lexical ranking can still contribute when vectors are incompatible.
 
@@ -404,7 +404,7 @@ A GitHub Actions workflow in [`.github/workflows/ci.yml`](./.github/workflows/ci
 - **Single-user/local-first:** there is no authentication, authorization, per-user data isolation, or tenant model.
 - **CORS:** allowed origins are now configurable through `CORS_ORIGINS` and default to the two local Vite origins; credentials are disabled. Configure the exact production frontend origin before deployment.
 - **URL fetching and SSRF:** scheme checks do not block loopback, private-network, link-local, or cloud metadata targets; redirects can also change destinations. Do not expose URL ingestion or web search to untrusted clients until network-level URL validation and redirect checks are implemented.
-- **Uploads:** the current API reads uploaded bytes into memory and has no explicit size/count limits. Add size limits, extension/content validation, and resource quotas.
+- **Uploads:** single files are capped at 10 MiB and batches at 10 files. Files are read with a bounded read, but strict extension/content-type validation, a total batch-byte budget, and parser resource isolation are still recommended.
 - **External dependencies:** content fetching, web search, Gemini API quotas, and model availability can fail or change.
 - **Fallback is not equivalent to Gemini:** feature hashing provides lexical/subword similarity, not a semantic embedding model; fallback Q&A retrieves content but does not synthesize a grounded natural-language answer.
 - **Embedding-space consistency:** vectors created by different models or fallback implementations should not be mixed. When changing embedding models or dimensions, re-embed existing chunks or version the embedding space.
