@@ -139,10 +139,11 @@ ai-knowledge-inbox/
 │   │   └── index.css
 │   ├── package.json
 │   └── vite.config.js
-├── run_backend.bat                 # Windows backend launcher (expects backend/venv)
-├── run_backend.sh                  # Shell launcher (see note below)
-├── run_frontend.bat                # Windows frontend launcher
-├── run_frontend.sh                 # Shell frontend launcher
+├── setup.bat / setup.sh            # Install backend and frontend dependencies
+├── run_backend.bat / run_backend.sh # Backend launchers (use backend/.venv)
+├── run_frontend.bat / run_frontend.sh # Frontend launchers
+├── LICENSE
+├── .github/workflows/ci.yml        # Backend tests and frontend build
 ├── README.md
 └── DESIGN_TRADEOFFS.md
 ```
