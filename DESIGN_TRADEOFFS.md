@@ -1,107 +1,339 @@
-# Architectural Tradeoffs & System Design Analysis
+# Design Tradeoffs — AI Knowledge Inbox
 
-This document provides a detailed technical breakdown of the architectural decisions, design tradeoffs, failure modes at scale, and production roadmap for the **AI Knowledge Inbox**.
+This document records the **current implementation**, the reasons it is reasonable for a small local-first project, the limitations that follow from those choices, and an incremental path toward a safer production architecture.
 
----
+The repository is a useful prototype for exploring ingestion and RAG. It should not be described as production-hardened: it currently has no authentication or tenant isolation, uses broad CORS, fetches caller-provided URLs, stores embeddings in SQLite, and scans all chunks at query time.
 
-## 1. Chunking Approach Rationale
+## 1. Current architecture
 
-### Strategy Implemented
-We implemented an **Intentional Recursive Character Splitting with Overlap** algorithm (`backend/app/services/chunker.py`):
-- **Chunk Size**: `500` characters (configurable via `CHUNK_SIZE`).
-- **Overlap**: `100` characters (configurable via `CHUNK_OVERLAP`).
-- **Separators Hierarchy**: `["\n\n", "\n", ". ", "? ", "! ", "; ", " ", ""]`.
-
-### Rationale & Tradeoffs
-| Dimension | Fixed-Size Character Chunking | Recursive Boundary-Aware Chunking (Our Approach) | Semantic / LLM-Based Chunking |
-| :--- | :--- | :--- | :--- |
-| **Coherence** | Low (cuts words/sentences in half) | **High** (respects paragraphs, lines, and sentences) | Highest (groups by proposition) |
-| **Retrieval Quality** | Degraded vector relevance | **Preserves context & boundary transitions** | Highest, but high latency & cost |
-| **Compute Overhead** | Negligible | **Low (< 2ms per document)** | Very High (requires LLM passes) |
-| **Cross-Chunk Continuity** | Poor without overlap | **Strong** (100-char overlap preserves semantic glue) | Strong |
-
-**Why 500 characters with 100 overlap?**
-- Shorter chunks (e.g. 100-200 chars) lack sufficient context for the embedding model to differentiate nuanced meanings.
-- Oversized chunks (e.g. 2000+ chars) dilute the vector representation with multiple topics, causing semantic drift during cosine similarity retrieval.
-- 500 characters (~75–100 tokens) strikes the sweet spot between granular retrieval specificity and context completeness for notes and web paragraphs.
-
----
-
-## 2. Vector Store Choice
-
-### Current Architecture: Embedded SQLite + NumPy Cosine Similarity
-- **Storage**: SQLite relational database (`knowledge_inbox.db`) with `items` and `chunks` tables.
-- **Vectors**: Serialized high-dimensional floating-point arrays (768-dim from `text-embedding-004`).
-- **Similarity Engine**: Vectorized matrix cosine similarity using `numpy` (`np.dot` over normalized vector matrix).
-
-### Why This Fits The Requirements
-1. **Zero External Infrastructure**: No Docker, no external services (Pinecone, Qdrant, Milvus) required to run locally. An evaluator can clone, run, and evaluate within 2 minutes.
-2. **ACID Transactions**: Item metadata and its corresponding vector chunks are committed or rolled back in a single SQLite transaction, preventing orphaned chunks.
-3. **Instant Startup**: Zero cold-start latency; no indexing daemon.
-
-### What Breaks at Scale?
-At scale (e.g. > 100,000 chunks or > 50 concurrent Q&A queries per second):
-1. **Full-Scan Vector Comparison ($O(N)$)**:
-   - Comparing a query vector against all chunk embeddings requires scanning every row in memory. While fast for up to 10,000 chunks (< 10ms with NumPy), it degrades linearly as $N$ grows into hundreds of thousands.
-2. **Memory Footprint**:
-   - Loading all embeddings into RAM on every query or keeping a heavy in-memory matrix consumes several hundred megabytes of RAM under large document sets.
-3. **Write Concurrency**:
-   - SQLite uses database-level locking during writes (`save_item_with_chunks`). Heavy parallel web ingestion will encounter `database is locked` contention.
-
----
-
-## 3. What Changes in Production?
-
-To transition this minimal architecture into an enterprise-scale, multi-tenant production system:
-
-```
-[ Clients ] 
-    │
-    ▼
-[ Cloudflare / Load Balancer ]
-    │
-    ├──► [ Ingestion Worker Service ] ──► [ Celery / Redis Queue ] ──► [ Async Scraper & Chunker ]
-    │                                                                           │
-    │                                                                           ▼
-    ├──► [ Query API Service ]                                        [ Managed Vector DB ]
-    │         │                                                          (pgvector / Qdrant)
-    │         ▼                                                                 ▲
-    │    [ Semantic Cache (Redis) ] ──(Cache Miss)──────────────────────────────┤
-    │         │
-    │         ▼
-    └────► [ LLM Gateway (Gemini 2.0 / 1.5 Flash with Fallback & Rate Limiting) ]
+```text
+[Browser: React + Vite]
+          |
+          | REST + SSE
+          v
+[FastAPI application]
+   |         |                |
+   |         |                +--> Web-assisted query
+   |         |                      DuckDuckGo HTML / Wikipedia fallback
+   |         |                      fetch article text
+   |         |                      ingest into same inbox
+   |         |
+   |         +--> Query: embed question -> rank chunks -> Gemini answer
+   |
+   +--> Ingest: parse -> chunk -> embed -> persist
+                       |
+                       v
+              [SQLite: items + chunks]
+              [embedding JSON per chunk]
 ```
 
-### 1. Vector Engine Upgrade
-- Migrate to **PostgreSQL with `pgvector`** (HNSW or IVFFlat indexing) or dedicated engines like **Qdrant** / **Milvus**.
-- Approximate Nearest Neighbors (ANN) indexing brings search complexity from $O(N)$ down to $O(\log N)$ or $O(1)$.
+The backend currently runs ingestion and querying in the request lifecycle. The frontend calls the backend using `VITE_API_BASE_URL`, defaulting to `http://127.0.0.1:8000`.
 
-### 2. Asynchronous Ingestion & Task Queues
-- URL scraping and external content parsing are I/O-heavy and prone to timeouts or rate limits.
-- In production, `/ingest` should return `202 Accepted` with a job ID, offloading the scrape, chunk, and embed operations to a background queue (Celery, ARQ, or AWS SQS).
-- Use WebSockets or SSE for realtime status updates in the UI ("Scraping...", "Chunking...", "Indexed").
+### Main modules
 
-### 3. Chunking & Hybrid Search
-- Implement **Hybrid Search**: Combine dense vector retrieval (semantic) with sparse BM25 keyword search (exact matches for names, code symbols, part numbers).
-- Use a **Reranker** (e.g. Cohere Rerank or cross-encoder) on the top 20 candidate chunks to refine the final top 4 context snippets passed to the LLM.
+| Module | Current responsibility |
+|---|---|
+| `backend/app/main.py` | FastAPI lifespan, CORS, error handlers, API endpoints |
+| `backend/app/schemas.py` | Request and response validation |
+| `backend/app/database.py` | SQLite schema, transactions, item/chunk reads and deletion |
+| `backend/app/services/ingest.py` | Note, URL, and file extraction; web-search scraping |
+| `backend/app/services/chunker.py` | Recursive character splitting and overlap |
+| `backend/app/services/embeddings.py` | Gemini embeddings, fallback vectors, cosine and lexical scoring |
+| `backend/app/services/rag.py` | Ingestion orchestration, prompt construction, Q&A, SSE, web-assisted Q&A |
+| `frontend/src/api.js` | HTTP API client and SSE stream parser |
+| `frontend/src/components/` | Capture UI, inbox, answer display and source excerpts |
 
-### 4. Guardrails & Observability
-- OpenTelemetry distributed tracing across embedding calls and LLM generation.
-- Grounding verification / hallucination detection metrics (e.g. Ragas, TruLens).
-- Semantic caching with Redis to instantly serve repeated identical or near-identical questions without re-invoking LLM APIs.
+## 2. Content ingestion
 
----
+The application accepts notes, URLs, individual file uploads, and a batch of uploads. Text is extracted before chunking and embedding; item metadata and related chunks are then written to SQLite.
 
-## 4. Debuggability & Code Quality Highlights
+### URL extraction
 
-- **Separation of Concerns**:
-  - `database.py`: Pure data access and schema definition.
-  - `ingest.py`: Content fetching, HTML sanitization, and title extraction.
-  - `chunker.py`: Text chunking logic with boundary preservation.
-  - `embeddings.py`: Vector operations, client management, and similarity ranking.
-  - `rag.py`: Orchestration of context grounding, prompt engineering, and LLM calls.
-  - `main.py`: Clean HTTP endpoints, input validation, and exception translation.
-- **Strict Input Validation**:
-  - Pydantic models validate URL schemes (`http://`, `https://`), minimum lengths, content presence, and integer boundaries (`top_k` between 1 and 10).
-- **Graceful Degraded / Demo Mode**:
-  - If a user runs the application without a Gemini API key or with an invalid key, the app gracefully falls back to deterministic mock embeddings and informative responses rather than crashing.
+The fetcher uses HTTPX with a timeout and redirect following. BeautifulSoup removes common boilerplate elements such as scripts, styles, navigation, headers, footers, forms, SVGs, and sidebars before extracting text.
+
+**Benefits**
+- Easy to understand and operate locally.
+- No separate crawler or browser runtime is required.
+- Readable text extraction works for many conventional content pages.
+
+**Costs and failure modes**
+- JavaScript-rendered pages may not contain the actual article in the returned HTML.
+- Site-specific layouts, paywalls, anti-bot responses, and malformed HTML affect extraction quality.
+- Redirects and caller-controlled URLs create SSRF risk. Checking only the `http://` and `https://` prefixes does not protect internal or metadata services.
+- Text is extracted without a robust content provenance or freshness model.
+
+**Recommended changes before public exposure**
+1. Parse URLs and allow only HTTP(S) schemes with no embedded credentials.
+2. Resolve and reject loopback, private, link-local, multicast, reserved, and metadata-service IPs for both IPv4 and IPv6.
+3. Revalidate every redirect destination and prevent DNS-rebinding gaps, ideally through a constrained egress proxy.
+4. Set strict connect/read/write/total timeouts, response byte limits, content-type checks, and per-user rate limits.
+5. Add tests for localhost/private addresses, redirects, invalid DNS, large bodies, and non-HTML responses.
+
+### File ingestion
+
+The current parser uses pypdf for PDFs and python-docx for DOCX paragraphs. It decodes a set of text-like extensions including Markdown, TXT, CSV, JSON, Python, JavaScript, and HTML; for other extensions, it may also attempt a generic text decode.
+
+**Tradeoff:** this keeps dependencies and setup small, but it is not a strict upload policy. Uploaded bytes are read into memory, and no explicit file-size, batch-size, per-user quota, or decompression/resource limit is enforced.
+
+**Next step:** define an explicit extension and MIME allowlist, validate signatures where practical, enforce request and per-file byte limits, cap batch count and total extracted characters, and isolate parser workloads if the service is exposed to untrusted uploads. Image-only PDFs need OCR, which is not currently implemented.
+
+### URL deduplication
+
+The database helper reuses an existing item when the incoming URL string exactly matches a stored `source_url`.
+
+This prevents straightforward duplicate submissions, but URLs that differ only by a trailing slash, tracking parameters, case, or redirect destination can still produce separate entries. URL canonicalization must be conservative: remove only known tracking parameters and preserve query parameters that alter content.
+
+## 3. Chunking strategy
+
+### What is implemented
+
+The splitter in `backend/app/services/chunker.py` defaults to:
+- `CHUNK_SIZE=500` characters
+- `CHUNK_OVERLAP=100` characters
+- Separators: paragraph breaks, newlines, sentence punctuation plus spaces, semicolons, spaces, and finally the empty separator
+
+It recursively chooses a separator that is present, builds chunks up to a character threshold, and seeds the next chunk with a tail overlap when possible.
+
+### Tradeoff comparison
+
+| Strategy | Advantages | Disadvantages | Fit for this project |
+|---|---|---|---|
+| Fixed character windows | Minimal implementation and predictable work | Can cut sentences/words; context can split awkwardly | Useful baseline |
+| Recursive boundary-aware characters (current) | Prefers natural separators; low compute cost; easy to tune | Character counts are not token counts; boundary handling can exceed the nominal size in some cases; separator choice can vary with document layout | Good simple default |
+| Token-based splitting | Better control of model token budgets | Requires tokenizer dependency and model-specific tuning | Good next iteration if context limits become an issue |
+| Semantic/LLM-based splitting | Can keep topics or propositions together | Extra latency, cost, complexity, and failure points | Only when quality evaluations show a clear benefit |
+
+Character-based chunk sizes do not correspond to fixed token counts. The previous README's claim that 500 characters always equals a particular number of tokens should not be relied on across languages and content types.
+
+### Overlap
+
+Overlap can preserve context around boundaries. It also creates duplicate text and redundant retrieval results, increasing embedding costs, storage, and the chance that multiple top results contain almost the same passage.
+
+Tune `CHUNK_SIZE` and `CHUNK_OVERLAP` using a small representative evaluation set. Measure retrieval recall, citation quality, latency, number of chunks, and token usage rather than assuming one setting is universally optimal.
+
+**Implementation note:** `chunk_content` uses `chunk_size or settings.CHUNK_SIZE` and `chunk_overlap or settings.CHUNK_OVERLAP`; passing zero uses the setting rather than zero. The overlap implementation is approximate and should be tested against edge cases such as long unbroken tokens, tiny chunk sizes, and separators that occur infrequently.
+
+## 4. Embeddings and fallback behavior
+
+### Gemini path
+
+The configured embedding model is `gemini-embedding-001` in `backend/.env.example` and `backend/app/config.py`. The implementation batches up to 30 input texts per embedding call.
+
+Embedding behavior is external-service dependent: API availability, quotas, model dimensions, and model names can vary by account and over time.
+
+### Deterministic feature-hashing fallback
+
+When no usable API key is configured, or an embedding request raises an exception, the code generates local feature-hashing vectors with word hashes and character trigrams. Its default dimension is **3,072**, and it normalizes each non-empty vector.
+
+This fallback is useful for development, but it is not a semantic embedding model. It captures token/subword overlap and should not be described as equivalent to Gemini embedding quality. An exception from the Gemini call currently causes the entire requested embedding batch to fall back.
+
+### Critical consistency issue
+
+The existing test `backend/tests/test_services.py::test_embeddings_and_cosine_similarity` asserts that the first embedding has 768 dimensions. The checked-in fallback implementation defaults to 3,072 dimensions, so the test expectation conflicts with the fallback path. The configured model's returned dimension can also differ from the local fallback dimension.
+
+The retrieval code pads or truncates chunk vectors to the query-vector dimension. This prevents a simple shape error, but it does **not** make vectors from different embedding spaces comparable. A vector generated by one model cannot safely be mixed with feature-hashing vectors or vectors generated by a different model.
+
+**Recommended fix**
+1. Choose a versioned embedding-space contract with a documented dimension and model identifier.
+2. Persist embedding model/version metadata, ideally at the collection or chunk level.
+3. If the provider fails during ingestion, either fail that ingestion clearly or explicitly mark the item as fallback-indexed.
+4. Never compare across embedding spaces. Separate indexes by model/version or re-embed the entire collection when changing spaces.
+5. Update tests to assert the selected model/fallback contract deterministically and mock external API behavior instead of relying on a live API key.
+6. Add tests for vector-dimension mismatch and zero vectors.
+
+## 5. Retrieval scoring
+
+The current implementation in `embeddings.py` is **a custom dense-plus-lexical heuristic**, not BM25.
+
+For each chunk it calculates cosine similarity, then extracts distinct query terms after a small stopword list. If query terms overlap the chunk text, it computes a lexical score from query-term coverage and a capped occurrence-frequency boost. If lexical terms overlap, the final score is:
+
+```text
+final_score = 0.65 * lexical_score + 0.35 * max(cosine_similarity, 0)
+```
+
+If no lexical overlap exists, the score is the cosine similarity. Results are sorted in descending order and the first `top_k` are returned.
+
+**Why this is reasonable now**
+- No separate search engine or index is needed.
+- The scoring steps are inspectable and fast to prototype.
+- Exact names and technical terms can still influence ranking when embeddings are imperfect.
+
+**Limitations**
+- It is not BM25: it does not use inverse document frequency, corpus statistics, or a standard BM25 implementation.
+- The lexical and dense scores have different scales and are not calibrated.
+- The stopword list and tokenization are basic and English-centric.
+- Every stored chunk is read from SQLite for each query, and each chunk is scored in Python.
+- The returned `similarity_score` may be the hybrid score rather than pure cosine similarity; displaying it as a calibrated percentage match is misleading.
+
+**Next steps**
+- Build a small labelled query/chunk evaluation set.
+- Compare dense-only, lexical-only, and hybrid search with Recall@k, MRR, and nDCG@k.
+- Consider SQLite FTS5 for lexical retrieval and Reciprocal Rank Fusion (RRF) to combine rankings rather than directly combining scores of unlike scales.
+- Add a cross-encoder reranker only if offline evaluation demonstrates improved relevance worth its added latency and cost.
+
+## 6. RAG prompt and answer generation
+
+The pipeline constructs a prompt containing retrieved chunks, source titles/URLs, and an instruction to answer only from the supplied context and state when the context is insufficient. The answer-generation path tries the configured model and a list of fallback model identifiers.
+
+**Benefits**
+- The response includes the selected source excerpts for inspection.
+- Prompt instructions encourage context-grounded answers and source references.
+- Model failover can reduce failures when one configured model is unavailable.
+
+**Limitations**
+- Prompt instructions are not a security boundary and do not guarantee factual grounding.
+- Retrieved web pages and documents are untrusted input and can contain prompt injection.
+- Source citations are generated by the model; they should be validated against the actual retrieved source list.
+- Similarity does not mean factual support.
+- The code detects missing knowledge using string matching over the answer text, which is brittle.
+- Model identifiers and availability should be validated against the target Google AI environment; do not assume a fallback model is available just because it appears in a list.
+
+**Recommended improvements**
+1. Treat retrieved source content as untrusted data and delimit it clearly in the prompt.
+2. Validate citation IDs against the source snippets supplied to the model.
+3. Return structured answer/citation data where possible rather than relying solely on text patterns.
+4. Add model-call deadlines, bounded retries with exponential backoff and jitter, and explicit handling for quota, authentication, timeout, and malformed responses.
+5. Track answer latency, retrieval latency, prompt/output token counts, provider errors, and source count.
+6. Evaluate groundedness and retrieval separately using a reproducible question set; do not claim anti-hallucination guarantees.
+
+## 7. Persistence choice: SQLite and JSON vectors
+
+### Current schema
+
+The current SQLite database holds:
+- `items`: item ID, source type, source URL/name, title, raw extracted content, and creation timestamp.
+- `chunks`: chunk ID, parent item ID, chunk order, chunk content, JSON-serialized embedding, and timestamp.
+
+A foreign key links chunks to items with `ON DELETE CASCADE`. Item and chunk inserts are performed using one connection/transaction path. The schema creates indexes for chunk-to-item lookup and item creation time.
+
+### Benefits
+- Zero additional infrastructure for local development.
+- Portable database file and straightforward backup for a stopped local instance.
+- Transactional item/chunk writes and simple inspectability.
+- Low operational overhead for a small single-user data set.
+
+### Costs and boundaries
+- The application deserializes all embedding JSON and loads all chunks into memory per query.
+- Full-scan ranking cost grows linearly with chunk count. Exact latency depends on the embedding dimensions, hardware, Python overhead, disk/cache state, and collection shape; a fixed threshold such as “10,000 chunks under 10 ms” is not guaranteed.
+- SQLite allows concurrent readers but has a single-writer model. Ingestion contention grows with simultaneous writes.
+- There is no authentication, tenant field, embedding-version field, document status, or database migration framework in the current schema.
+- File-based persistence needs explicit backups and volume management if hosted in a container.
+
+**Recommendation:** keep SQLite while the application is a local prototype. Do not migrate databases based only on an arbitrary row-count threshold. Measure p95/p99 query latency, ingestion throughput, database size, memory use, and write contention with representative workloads.
+
+## 8. API and frontend contract
+
+Implemented routes:
+
+| Method | Route | Behavior |
+|---|---|---|
+| GET | `/health` | Returns service name, configured model names, and a basic API-key-configured flag |
+| POST | `/ingest` | Ingest note or URL |
+| POST | `/ingest/file` | Ingest one uploaded file |
+| POST | `/ingest/files` | Ingest several files sequentially and report successful items/chunks |
+| GET | `/items` | List saved items with raw content and chunk counts |
+| DELETE | `/items/{item_id}` | Delete a saved item and related chunks |
+| POST | `/query` | Synchronous RAG query |
+| POST | `/query/stream` | SSE answer stream |
+| POST | `/query/web-search` | Search, fetch, ingest, and query |
+
+### API design tradeoffs
+
+- Ingestion happens synchronously in the HTTP request, so slow page fetches and embedding-provider delays hold a request open.
+- The batch file endpoint processes files sequentially and can partially succeed. The current response reports successful file count and total chunks but does not provide a fully typed per-file error list.
+- `GET /items` returns raw extracted content, which is convenient for a local UI but may expose sensitive data if a future multi-user API is added without authorization.
+- API exception handling in some query/file routes includes exception text in the returned detail. Avoid leaking upstream, file, or internal information in public deployments.
+- The streaming API emits `sources`, `token`, and `done` events but does not currently define a separate error event schema.
+
+## 9. Security and operational risks
+
+These items are blockers before exposing the service to the public internet or using it for sensitive knowledge collections.
+
+| Risk | Current behavior | Required mitigation |
+|---|---|---|
+| No authentication/authorization | API routes are publicly callable if the server is reachable | Add identity, authorization, and ownership checks |
+| No tenant isolation | All items share one logical collection | Add tenant/user scoping to every read, query, and mutation |
+| Broad CORS | Allows all origins/methods/headers with credentials | Restrict trusted frontend origins and required methods |
+| SSRF | Caller-provided URLs are fetched; redirects are followed | Validate every destination and redirect; block private/link-local/metadata networks; constrain egress |
+| Upload resource exhaustion | Entire upload read into memory; no explicit size/count cap | Enforce byte limits, file allowlist, batch limits, quotas, and parser resource limits |
+| Prompt injection | Retrieved content is included in the LLM prompt | Delimit and treat documents as untrusted, separate instructions from data, test adversarial inputs |
+| Secrets | API key comes from environment | Keep secrets out of Git/logs; use deployment secrets and rotate exposed keys |
+| Logging/privacy | Request/query information is logged | Avoid logging sensitive raw content; define retention and access rules |
+| Backup/recovery | A local SQLite file is the source of truth | Define consistent backups, restore drills, and persistent-volume policy |
+| Service resilience | Provider calls and scraping are request-path dependencies | Timeouts, bounded retries, rate limits, concurrency limits, and observable failure metrics |
+
+The health endpoint's API-key flag is only a configuration check. It does not prove that the key is valid or that the provider is reachable.
+
+## 10. What changes for production?
+
+Do not introduce every component at once. The right sequence is to fix correctness and security boundaries first, then evolve infrastructure when measurements justify it.
+
+### Phase 1 — Correctness and minimum safety
+
+- Resolve the embedding dimension/model inconsistency and add embedding-space metadata.
+- Add tests for URL validation/SSRF, redirect handling, empty/oversized files, batch partial failures, and provider errors.
+- Restrict CORS and avoid returning raw internal exception text.
+- Enforce upload limits and URL fetch byte/time limits.
+- Verify model IDs and configure bounded retries/timeouts.
+- Add request IDs and structured error responses.
+
+### Phase 2 — Measurable quality and operability
+
+- Create retrieval evaluation data and track Recall@k, MRR, nDCG@k, answer groundedness, and citation validity.
+- Add metrics for request latency, ingestion duration, embedding calls/errors, retrieved chunk count, query latency, SQLite busy errors, and Gemini quota failures.
+- Add persistent storage/backup/restore documentation and a reproducible test environment.
+- Consider SQLite FTS5 for lexical search; compare rank-fusion approaches empirically.
+- Add pagination to item listing and avoid sending all raw document content unless requested.
+
+### Phase 3 — Scale only when workload demands it
+
+A possible later deployment topology is:
+
+```text
+[Web UI]
+    |
+[API / Auth / Rate limits]
+    |                    |
+    v                    v
+[Query service]     [Ingestion API]
+    |                    |
+    v                    v
+[Vector + lexical]  [Durable task queue]
+    |                    |
+    v                    v
+[LLM gateway]       [Isolated workers]
+                         |
+                  [Object/document storage]
+```
+
+Potential choices—not current dependencies—include:
+- PostgreSQL with pgvector or a vector engine such as Qdrant for vector search.
+- PostgreSQL full-text search or a dedicated search engine for lexical retrieval.
+- A durable queue (such as Celery with Redis/RabbitMQ or a managed queue) for long-running ingestion jobs.
+- Object storage for uploaded originals where retention requirements justify it.
+- An LLM gateway or provider adapter for rate limiting, timeout policy, model routing, and cost tracking.
+- OpenTelemetry traces and metrics plus dashboards/alerts.
+
+**Do not claim ANN always changes search from O(N) to O(log N) or O(1).** ANN algorithms trade exactness for retrieval speed, and their performance depends on index type, parameters, data distribution, recall target, and filtering patterns.
+
+For asynchronous ingestion, a job-based interface could return `202 Accepted` with a durable job ID and expose a status endpoint or SSE updates. That is a future API design; the current API performs ingestion synchronously.
+
+## 11. Decision summary
+
+| Decision | Current choice | Why now | Trigger to reconsider |
+|---|---|---|---|
+| API framework | FastAPI | Simple typed API and built-in OpenAPI | Service boundaries or deployment constraints change |
+| Frontend | React + Vite | Lightweight client build and local development | Product requirements require a different deployment/rendering model |
+| Persistence | SQLite | One-file, zero-service local setup | Measured write contention, availability, multi-user, or operational requirements |
+| Chunking | Recursive characters + overlap | Low-cost baseline, easy to tune | Evaluation shows poor retrieval or token-budget inefficiency |
+| Embeddings | Gemini with deterministic local fallback | External semantic quality plus offline development path | Cost, policy, privacy, latency, or provider constraints |
+| Retrieval | Full-scan NumPy plus lexical heuristic | Transparent and easy to test on small collections | Query latency or retrieval evaluation degrades |
+| Ingestion | Synchronous request handling | Minimum moving parts | Long-running requests, throughput, reliability, or rate limits become problematic |
+| Streaming | SSE | Simple incremental response in browsers | Need resumability, durable generation jobs, or bidirectional communication |
+| Observability | Application logging | Low setup cost | Multi-instance production operation requires metrics/traces/alerts |
+
+## 12. Bottom line
+
+The current design prioritizes **simple local setup, clear module boundaries, and an inspectable RAG workflow** over scale and security hardening. That is an appropriate prototype tradeoff when its boundaries are explicit.
+
+The most important near-term actions are not to add Kubernetes, Redis, or a vector database immediately. They are to resolve the embedding-space mismatch, harden caller-controlled URL fetching and uploads, restrict CORS, add targeted tests, and measure retrieval quality. Infrastructure changes should follow demonstrated needs.
