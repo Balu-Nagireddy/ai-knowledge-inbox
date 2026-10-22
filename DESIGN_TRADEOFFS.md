@@ -270,12 +270,12 @@ Do not introduce every component at once. The right sequence is to fix correctne
 
 ### Phase 1 — Correctness and minimum safety
 
-- Resolve the embedding dimension/model inconsistency and add embedding-space metadata.
-- Add tests for URL validation/SSRF, redirect handling, empty/oversized files, batch partial failures, and provider errors.
-- Restrict CORS and avoid returning raw internal exception text.
-- Enforce upload limits and URL fetch byte/time limits.
-- Verify model IDs and configure bounded retries/timeouts.
-- Add request IDs and structured error responses.
+- Add embedding-model/version metadata so persisted vectors can be safely re-indexed when the embedding implementation changes.
+- Add focused tests for redirect targets, batch partial failures, and provider errors; the existing suite already covers basic private-URL rejection and oversized single-file uploads.
+- Add a total batch-byte limit and strict file extension/content-type allowlisting.
+- Add a response-size limit for fetched web pages and consider moving DNS validation off the async event loop.
+- Verify configured Gemini model IDs and review retry/timeout behavior against current provider limits.
+- Add request IDs if debugging across multiple concurrent requests becomes necessary.
 
 ### Phase 2 — Measurable quality and operability
 
@@ -338,10 +338,9 @@ The current design prioritizes **simple local setup, clear module boundaries, an
 
 The most important near-term actions are not to add Kubernetes, Redis, or a vector database immediately. The embedding comparison and fixed-dimension test mismatch have been corrected; CORS is configurable, URL destination checks are in place, upload limits are enforced, and SQLite startup recursion has been fixed. Remaining priorities are network-level SSRF protection, a total batch-byte budget, targeted redirect/abuse tests, and retrieval-quality evaluation. Infrastructure changes should follow demonstrated needs.
 
-## 13. Local setup, licensing, and CI
+## 13. Local setup and licensing
 
 - `setup.bat` installs backend and frontend dependencies on Windows; `bash setup.sh` does the same on macOS/Linux.
 - Launch backend and frontend in separate terminals with the matching `.bat` or `.sh` scripts. The shell scripts use `backend/.venv` and fail early if setup has not been run.
 - `.gitignore` excludes `.venv` directories, local databases, and environment files.
 - The repository now includes an MIT `LICENSE`.
-- GitHub Actions runs the backend test suite without a Gemini key and builds the frontend. A green workflow run is the verification signal; adding the workflow file alone does not prove tests pass.
