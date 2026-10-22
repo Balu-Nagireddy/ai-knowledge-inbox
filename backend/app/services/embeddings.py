@@ -85,6 +85,9 @@ def generate_query_embedding(query: str) -> List[float]:
 
 def compute_cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
     """Compute cosine similarity between two vectors."""
+    # Vectors from different embedding spaces must not be compared.
+    if len(vec_a) != len(vec_b):
+        return 0.0
     a = np.array(vec_a, dtype=np.float32)
     b = np.array(vec_b, dtype=np.float32)
     norm_a = np.linalg.norm(a)
@@ -100,9 +103,8 @@ def rank_chunks_by_similarity(
     query_text: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
-    Rank chunks using production Hybrid Retrieval:
-    Combines dense vector cosine similarity with lexical keyword overlap (BM25 style),
-    ensuring relevant domain documents are always retrieved accurately even when embeddings fluctuate.
+    Rank chunks using a lightweight hybrid heuristic combining cosine similarity
+    with lexical keyword overlap. This is not a BM25 implementation.
     """
     if not chunks:
         return []
@@ -124,14 +126,13 @@ def rank_chunks_by_similarity(
         sim = 0.0
         if query_norm > 0 and chunk.get("embedding"):
             raw_emb = chunk["embedding"]
-            if len(raw_emb) < q_dim:
-                raw_emb = list(raw_emb) + [0.0] * (q_dim - len(raw_emb))
-            elif len(raw_emb) > q_dim:
-                raw_emb = list(raw_emb)[:q_dim]
-            chunk_vec = np.array(raw_emb, dtype=np.float32)
-            chunk_norm = np.linalg.norm(chunk_vec)
-            if chunk_norm > 0:
-                sim = float(np.dot(query_vec, chunk_vec) / (query_norm * chunk_norm))
+            # Different dimensions usually indicate different embedding spaces.
+            # Do not pad/truncate: that creates mathematically valid but meaningless scores.
+            if len(raw_emb) == q_dim:
+                chunk_vec = np.array(raw_emb, dtype=np.float32)
+                chunk_norm = np.linalg.norm(chunk_vec)
+                if chunk_norm > 0:
+                    sim = float(np.dot(query_vec, chunk_vec) / (query_norm * chunk_norm))
 
         # 2. Lexical keyword overlap score
         lexical_score = 0.0
