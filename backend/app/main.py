@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI Knowledge Inbox API",
-    description="Production-style minimal RAG backend for ingesting notes/URLs and answering semantic queries.",
+    description="Local-first RAG backend for ingesting notes, URLs, and documents and answering grounded questions.",
     version="1.1.0",
     lifespan=lifespan
 )
@@ -42,8 +42,8 @@ app = FastAPI(
 # CORS Middleware for local frontend communication
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -137,7 +137,8 @@ async def ingest_file(
         raise
     except Exception as exc:
         logger.error(f"File ingestion error: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to ingest file: {str(exc)}")
+        logger.error("File ingestion failed", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to ingest file.")
 
 @app.post("/ingest/files", response_model=BatchIngestResponse, status_code=status.HTTP_201_CREATED, tags=["Ingestion"])
 async def ingest_multiple_files(
@@ -217,7 +218,8 @@ async def query(payload: QueryRequest):
         return QueryResponse(**result)
     except Exception as exc:
         logger.error(f"Query endpoint error: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to process query: {str(exc)}")
+        logger.error("Query processing failed", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to process query.")
 
 @app.post("/query/stream", tags=["RAG"])
 async def query_stream(payload: QueryRequest):
@@ -243,5 +245,6 @@ async def query_web_search(payload: WebSearchRequest):
         return QueryResponse(**result)
     except Exception as exc:
         logger.error(f"Web search ingest error: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Web search retrieval failed: {str(exc)}")
+        logger.error("Web-assisted query failed", exc_info=True)
+        raise HTTPException(status_code=502, detail="Web-assisted query failed. Check upstream connectivity and try again.")
 
