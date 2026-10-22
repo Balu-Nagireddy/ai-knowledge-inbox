@@ -4,6 +4,9 @@ from fastapi import FastAPI, HTTPException, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_BATCH_FILES = 10
+
 from app.config import settings
 from app.logging_config import setup_logging, logger
 from app.database import init_db, get_items, delete_item
@@ -118,7 +121,9 @@ async def ingest_file(
     """
     logger.info(f"Received file upload: {file.filename}")
     try:
-        file_bytes = await file.read()
+        file_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(file_bytes) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="File exceeds the 10 MiB upload limit.")
         saved_item = await ingest_content(
             source_type="file",
             file_bytes=file_bytes,
@@ -149,6 +154,8 @@ async def ingest_multiple_files(
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(status_code=413, detail=f"A batch may contain at most {MAX_BATCH_FILES} files.")
 
     logger.info(f"Received batch file upload with {len(files)} files.")
     saved_items: List[IngestResponse] = []
@@ -157,7 +164,10 @@ async def ingest_multiple_files(
 
     for f in files:
         try:
-            file_bytes = await f.read()
+            file_bytes = await f.read(MAX_UPLOAD_BYTES + 1)
+            if len(file_bytes) > MAX_UPLOAD_BYTES:
+                errors.append(f"{f.filename}: file exceeds the 10 MiB upload limit")
+                continue
             saved = await ingest_content(
                 source_type="file",
                 file_bytes=file_bytes,
