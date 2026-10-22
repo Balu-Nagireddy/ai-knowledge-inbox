@@ -25,13 +25,9 @@ from app.services.embeddings import (
     get_genai_client
 )
 
-# Resilient model failover hierarchy
-MODEL_FALLBACK_LIST = [
-    settings.LLM_MODEL,
-    "gemini-2.5-flash",
-    "gemini-1.5-flash",
-    "gemini-2.0-flash"
-]
+# Prioritize gemini-3.8-flash first; seamlessly failover if daily 20-request quota is exhausted (429)
+MODELS_PRIORITY = [settings.LLM_MODEL,"gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
+
 
 async def ingest_content(
     source_type: str,
@@ -52,7 +48,11 @@ async def ingest_content(
     elif source_type == "url":
         if not url:
             raise IngestionError("URL is required for 'url' source_type.", status_code=400)
-        title, clean_text = await fetch_url_content(url, custom_title)
+        if content and content.strip():
+            title = custom_title or url
+            clean_text = content.strip()
+        else:
+            title, clean_text = await fetch_url_content(url, custom_title)
         source_url = url
     elif source_type == "file":
         if not file_bytes or not filename:
@@ -155,13 +155,8 @@ async def execute_rag_query(question: str, top_k: int = 4) -> Dict[str, Any]:
     if client:
         rag_prompt = build_rag_prompt(question, top_chunks)
         
-        # Multi-model retry & failover
-        models_to_try = []
-        for m in [settings.LLM_MODEL, "gemini-2.5-flash", "gemini-1.5-flash"]:
-            if m and m not in models_to_try:
-                models_to_try.append(m)
-
-        for model_name in models_to_try:
+        last_error = None
+        for model_name in MODELS_PRIORITY:
             try:
                 logger.info(f"Invoking Gemini model '{model_name}'...")
                 response = client.models.generate_content(
@@ -170,12 +165,15 @@ async def execute_rag_query(question: str, top_k: int = 4) -> Dict[str, Any]:
                 )
                 if response and response.text:
                     answer_text = response.text.strip()
+                    logger.info(f"Successfully generated answer using '{model_name}'.")
                     break
             except Exception as exc:
-                logger.warning(f"Model '{model_name}' call failed: {exc}. Trying next fallback...")
-                await asyncio.sleep(1.0)
+                last_error = exc
+                logger.warning(f"Model '{model_name}' failed ({exc}). Failing over to next model in priority...")
+                await asyncio.sleep(0.5)
                 
         if not answer_text:
+            logger.error(f"All models exhausted: {last_error}")
             answer_text = "Encountered a temporary issue communicating with the AI service. Please try again."
     else:
         answer_text = (
@@ -230,12 +228,7 @@ async def stream_rag_query(question: str, top_k: int = 4) -> AsyncGenerator[str,
     rag_prompt = build_rag_prompt(question, top_chunks)
     stream_success = False
 
-    models_to_try = []
-    for m in [settings.LLM_MODEL, "gemini-2.5-flash", "gemini-1.5-flash"]:
-        if m and m not in models_to_try:
-            models_to_try.append(m)
-
-    for model_name in models_to_try:
+    for model_name in MODELS_PRIORITY:
         try:
             logger.info(f"Streaming with Gemini model '{model_name}'...")
             response_stream = client.models.generate_content_stream(
@@ -246,13 +239,14 @@ async def stream_rag_query(question: str, top_k: int = 4) -> AsyncGenerator[str,
                 if chunk.text:
                     yield f"event: token\ndata: {json.dumps(chunk.text)}\n\n"
             stream_success = True
+            logger.info(f"Streaming completed successfully using '{model_name}'.")
             break
         except Exception as exc:
-            logger.warning(f"Streaming with '{model_name}' failed: {exc}. Trying fallback...")
-            await asyncio.sleep(0.8)
+            logger.warning(f"Streaming with '{model_name}' failed: {exc}. Trying next priority model...")
+            await asyncio.sleep(0.5)
 
     if not stream_success:
-        yield f"event: token\ndata: {json.dumps('Unable to complete streaming with AI models. Please retry.')}\n\n"
+        yield f"event: token\ndata: {json.dumps('Encountered a temporary issue communicating with Gemini AI. Please retry.')}\n\n"
 
     yield "event: done\ndata: [DONE]\n\n"
 
@@ -272,7 +266,8 @@ async def web_search_ingest_and_answer(question: str) -> Dict[str, Any]:
             saved = await ingest_content(
                 source_type="url",
                 url=art["url"],
-                custom_title=art["title"]
+                custom_title=art.get("title"),
+                content=art.get("content")
             )
             newly_ingested.append(saved)
         except Exception as exc:

@@ -7,7 +7,15 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.config import settings
 from app.logging_config import setup_logging, logger
 from app.database import init_db, get_items, delete_item
-from app.schemas import IngestRequest, IngestResponse, ItemResponse, QueryRequest, QueryResponse, WebSearchRequest
+from app.schemas import (
+    IngestRequest,
+    IngestResponse,
+    BatchIngestResponse,
+    ItemResponse,
+    QueryRequest,
+    QueryResponse,
+    WebSearchRequest
+)
 from app.services.ingest import IngestionError
 from app.services.rag import ingest_content, execute_rag_query, stream_rag_query, web_search_ingest_and_answer
 
@@ -130,6 +138,53 @@ async def ingest_file(
     except Exception as exc:
         logger.error(f"File ingestion error: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to ingest file: {str(exc)}")
+
+@app.post("/ingest/files", response_model=BatchIngestResponse, status_code=status.HTTP_201_CREATED, tags=["Ingestion"])
+async def ingest_multiple_files(
+    files: List[UploadFile] = File(..., description="List of document files to ingest at once")
+):
+    """
+    Ingest multiple uploaded document files in a single batch operation.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided.")
+
+    logger.info(f"Received batch file upload with {len(files)} files.")
+    saved_items: List[IngestResponse] = []
+    total_chunks = 0
+    errors: List[str] = []
+
+    for f in files:
+        try:
+            file_bytes = await f.read()
+            saved = await ingest_content(
+                source_type="file",
+                file_bytes=file_bytes,
+                filename=f.filename,
+                custom_title=f.filename
+            )
+            resp = IngestResponse(
+                id=saved["id"],
+                source_type=saved["source_type"],
+                title=saved["title"],
+                source_url=saved["source_url"],
+                chunk_count=saved["chunk_count"],
+                created_at=saved["created_at"]
+            )
+            saved_items.append(resp)
+            total_chunks += saved["chunk_count"]
+        except Exception as exc:
+            logger.error(f"Failed to ingest batch file '{f.filename}': {exc}")
+            errors.append(f"{f.filename}: {str(exc)}")
+
+    if not saved_items and errors:
+        raise HTTPException(status_code=422, detail="; ".join(errors))
+
+    return BatchIngestResponse(
+        items=saved_items,
+        total_files=len(saved_items),
+        total_chunks=total_chunks
+    )
 
 @app.get("/items", response_model=List[ItemResponse], tags=["Items"])
 async def list_items():

@@ -28,6 +28,11 @@ class IngestResponse(BaseModel):
     chunk_count: int
     created_at: str
 
+class BatchIngestResponse(BaseModel):
+    items: List[IngestResponse]
+    total_files: int
+    total_chunks: int
+
 class ItemResponse(BaseModel):
     id: str
     source_type: str

@@ -73,3 +73,20 @@ def test_ingest_file_endpoint():
     
     # Clean up
     client.delete(f"/items/{data['id']}")
+
+def test_ingest_multiple_files_batch():
+    f1 = ("doc1.txt", b"First test document about machine learning pipelines and vector search.", "text/plain")
+    f2 = ("doc2.md", b"# Cloud Native\nKubernetes automates deployment, scaling, and operations.", "text/markdown")
+    
+    files = [("files", f1), ("files", f2)]
+    res = client.post("/ingest/files", files=files)
+    assert res.status_code == 201
+    data = res.json()
+    assert data["total_files"] == 2
+    assert data["total_chunks"] >= 2
+    assert len(data["items"]) == 2
+
+    # Clean up
+    for item in data["items"]:
+        client.delete(f"/items/{item['id']}")
+

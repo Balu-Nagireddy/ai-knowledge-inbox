@@ -1,13 +1,13 @@
 import React, { useState, useRef } from 'react';
-import { PlusCircle, FileText, Globe, UploadCloud, Loader2, AlertCircle, CheckCircle2, FileUp, X } from 'lucide-react';
-import { ingestItem, uploadFileItem } from '../api';
+import { PlusCircle, FileText, Globe, UploadCloud, Loader2, AlertCircle, CheckCircle2, FileUp, X, Files } from 'lucide-react';
+import { ingestItem, uploadFileItem, uploadFilesBatch } from '../api';
 
 export default function IngestBox({ onItemIngested }) {
   const [sourceType, setSourceType] = useState('note'); // 'note' | 'url' | 'file'
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [url, setUrl] = useState('');
-  const [selectedFile, setSelectedFile] = useState(null);
+  const [selectedFiles, setSelectedFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -15,8 +15,12 @@ export default function IngestBox({ onItemIngested }) {
   const fileInputRef = useRef(null);
 
   const handleFileChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      setSelectedFile(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      const newFiles = Array.from(e.target.files);
+      setSelectedFiles((prev) => {
+        const existingNames = new Set(prev.map((f) => f.name));
+        return [...prev, ...newFiles.filter((f) => !existingNames.has(f.name))];
+      });
       setError(null);
     }
   };
@@ -24,8 +28,12 @@ export default function IngestBox({ onItemIngested }) {
   const handleDrop = (e) => {
     e.preventDefault();
     setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      setSelectedFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const newFiles = Array.from(e.dataTransfer.files);
+      setSelectedFiles((prev) => {
+        const existingNames = new Set(prev.map((f) => f.name));
+        return [...prev, ...newFiles.filter((f) => !existingNames.has(f.name))];
+      });
       setError(null);
     }
   };
@@ -37,6 +45,17 @@ export default function IngestBox({ onItemIngested }) {
 
   const handleDragLeave = () => {
     setIsDragging(false);
+  };
+
+  const removeFile = (idx, e) => {
+    if (e) e.stopPropagation();
+    setSelectedFiles((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const clearAllFiles = (e) => {
+    if (e) e.stopPropagation();
+    setSelectedFiles([]);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleSubmit = async (e) => {
@@ -59,42 +78,50 @@ export default function IngestBox({ onItemIngested }) {
       }
     }
     if (sourceType === 'file') {
-      if (!selectedFile) {
-        setError('Please choose a file to upload (.pdf, .docx, .md, .txt).');
+      if (selectedFiles.length === 0) {
+        setError('Please choose at least one document file to upload (.pdf, .docx, .md, .txt).');
         return;
       }
     }
 
     try {
       setLoading(true);
-      let res;
       if (sourceType === 'file') {
-        res = await uploadFileItem({
-          file: selectedFile,
-          title: title || selectedFile.name,
-        });
-        setSelectedFile(null);
+        if (selectedFiles.length === 1) {
+          const res = await uploadFileItem({
+            file: selectedFiles[0],
+            title: title || selectedFiles[0].name,
+          });
+          setSuccess(`Saved "${res.title}" and generated ${res.chunk_count} vector chunk(s).`);
+          if (onItemIngested) onItemIngested(res);
+        } else {
+          const batchRes = await uploadFilesBatch({ files: selectedFiles });
+          setSuccess(`Batch uploaded ${batchRes.total_files} documents with ${batchRes.total_chunks} total vector chunk(s).`);
+          if (onItemIngested) onItemIngested();
+        }
+        setSelectedFiles([]);
         if (fileInputRef.current) fileInputRef.current.value = '';
       } else {
-        res = await ingestItem({
+        const res = await ingestItem({
           sourceType,
           title,
           content,
           url,
         });
+        setSuccess(`Saved "${res.title}" and generated ${res.chunk_count} vector chunk(s).`);
+        if (onItemIngested) onItemIngested(res);
       }
 
-      setSuccess(`Saved "${res.title}" and generated ${res.chunk_count} vector chunk(s).`);
       setTitle('');
       setContent('');
       setUrl('');
-      if (onItemIngested) onItemIngested(res);
     } catch (err) {
       setError(err.message || 'Ingestion failed');
     } finally {
       setLoading(false);
     }
   };
+
 
   return (
     <div className="glass-card">
@@ -195,9 +222,24 @@ export default function IngestBox({ onItemIngested }) {
 
         {sourceType === 'file' && (
           <div className="form-group">
-            <label className="input-label">Document File (.pdf, .docx, .md, .txt) *</label>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <label className="input-label" style={{ marginBottom: 0 }}>
+                Document Files (.pdf, .docx, .md, .txt) *
+              </label>
+              {selectedFiles.length > 0 && (
+                <button
+                  type="button"
+                  className="clear-file-btn"
+                  style={{ color: 'var(--text-muted)', fontSize: '0.78rem', background: 'none', border: 'none', cursor: 'pointer' }}
+                  onClick={clearAllFiles}
+                >
+                  Clear all ({selectedFiles.length})
+                </button>
+              )}
+            </div>
+
             <div
-              className={`file-dropzone ${isDragging ? 'dragging' : ''} ${selectedFile ? 'has-file' : ''}`}
+              className={`file-dropzone ${isDragging ? 'dragging' : ''} ${selectedFiles.length > 0 ? 'has-file' : ''}`}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
@@ -207,34 +249,52 @@ export default function IngestBox({ onItemIngested }) {
                 type="file"
                 ref={fileInputRef}
                 style={{ display: 'none' }}
+                multiple
                 accept=".pdf,.docx,.doc,.md,.txt"
                 onChange={handleFileChange}
               />
 
-              {selectedFile ? (
-                <div className="selected-file-pill">
-                  <FileUp size={18} color="var(--accent-secondary)" />
-                  <div className="file-info-text">
-                    <span className="file-name">{selectedFile.name}</span>
-                    <span className="file-size">{(selectedFile.size / 1024).toFixed(1)} KB</span>
+              {selectedFiles.length > 0 ? (
+                <div className="selected-files-container" onClick={(e) => e.stopPropagation()}>
+                  <div className="files-summary-bar">
+                    <span className="files-count-badge">
+                      <Files size={14} />
+                      {selectedFiles.length} file{selectedFiles.length > 1 ? 's' : ''} selected
+                    </span>
+                    <button
+                      type="button"
+                      className="add-more-files-btn"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      + Add more
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    className="clear-file-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedFile(null);
-                      if (fileInputRef.current) fileInputRef.current.value = '';
-                    }}
-                  >
-                    <X size={14} />
-                  </button>
+
+                  <div className="files-chips-list">
+                    {selectedFiles.map((f, idx) => (
+                      <div key={idx} className="selected-file-pill">
+                        <FileUp size={16} color="var(--accent-secondary)" />
+                        <div className="file-info-text">
+                          <span className="file-name" title={f.name}>{f.name}</span>
+                          <span className="file-size">{(f.size / 1024).toFixed(1)} KB</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="clear-file-btn"
+                          onClick={(e) => removeFile(idx, e)}
+                          title="Remove file"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ) : (
                 <div className="dropzone-prompt">
-                  <UploadCloud size={32} className="dropzone-icon" />
-                  <p className="dropzone-main-text">Click or drag & drop document here</p>
-                  <p className="dropzone-sub-text">Supports PDF, Word (.docx), Markdown (.md), and Text (.txt)</p>
+                  <UploadCloud size={34} className="dropzone-icon" />
+                  <p className="dropzone-main-text">Click or drag & drop files here</p>
+                  <p className="dropzone-sub-text">Select single or multiple files (PDF, Word, Markdown, Text)</p>
                 </div>
               )}
             </div>
@@ -246,7 +306,7 @@ export default function IngestBox({ onItemIngested }) {
             <>
               <Loader2 size={18} className="spinner" />
               {sourceType === 'file'
-                ? 'Parsing & Indexing File...'
+                ? `Indexing ${selectedFiles.length} File${selectedFiles.length > 1 ? 's' : ''}...`
                 : sourceType === 'url'
                 ? 'Fetching & Indexing...'
                 : 'Chunking & Embedding...'}
@@ -254,7 +314,9 @@ export default function IngestBox({ onItemIngested }) {
           ) : (
             <>
               <PlusCircle size={18} />
-              Save to Inbox
+              {sourceType === 'file' && selectedFiles.length > 1
+                ? `Save ${selectedFiles.length} Files to Inbox`
+                : 'Save to Inbox'}
             </>
           )}
         </button>

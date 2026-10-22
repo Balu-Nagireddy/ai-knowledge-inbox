@@ -62,6 +62,26 @@ export async function uploadFileItem({ file, title }) {
   return await res.json();
 }
 
+export async function uploadFilesBatch({ files }) {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append("files", file);
+  }
+
+  const res = await fetch(`${API_BASE}/ingest/files`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || "Failed to upload files batch");
+  }
+
+  return await res.json();
+}
+
+
 export async function searchWebAndAnswer(question) {
   const res = await fetch(`${API_BASE}/query/web-search`, {
     method: "POST",

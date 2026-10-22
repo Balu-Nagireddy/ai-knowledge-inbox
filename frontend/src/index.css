@@ -757,73 +757,140 @@ body {
   50% { opacity: 0; }
 }
 
-/* Web Fallback Recommendation Banner */
 .web-fallback-prompt {
-  background: linear-gradient(135deg, rgba(6, 182, 212, 0.1) 0%, rgba(99, 102, 241, 0.12) 100%);
-  border: 1px solid rgba(6, 182, 212, 0.35);
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.12) 0%, rgba(99, 102, 241, 0.15) 100%);
+  border: 1px solid rgba(6, 182, 212, 0.4);
+  border-left: 4px solid var(--accent-secondary);
   border-radius: var(--radius-md);
-  padding: 18px 20px;
+  padding: 20px 22px;
+  margin-top: 14px;
   margin-bottom: 24px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
+  box-shadow: 0 8px 24px -6px rgba(6, 182, 212, 0.2);
+  animation: fadeIn 0.3s ease-out;
 }
 
 .fallback-info {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 14px;
 }
 
 .fallback-icon-wrap {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: rgba(6, 182, 212, 0.15);
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: rgba(6, 182, 212, 0.2);
+  border: 1px solid rgba(6, 182, 212, 0.4);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.3);
 }
 
 .fallback-title {
-  font-size: 0.95rem;
+  font-size: 0.98rem;
   font-weight: 700;
   color: #ffffff;
   margin-bottom: 4px;
+  letter-spacing: -0.01em;
 }
 
 .fallback-desc {
-  font-size: 0.84rem;
+  font-size: 0.85rem;
   color: var(--text-muted);
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 .btn-web-action {
   align-self: flex-start;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  background: linear-gradient(135deg, #06b6d4, #3b82f6);
+  gap: 10px;
+  background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 50%, #6366f1 100%);
   color: #ffffff;
   border: none;
-  border-radius: var(--radius-sm);
-  padding: 10px 18px;
-  font-size: 0.86rem;
+  border-radius: var(--radius-md);
+  padding: 12px 22px;
+  font-size: 0.9rem;
   font-weight: 700;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(6, 182, 212, 0.3);
-  transition: all 0.2s ease;
+  box-shadow: 0 4px 18px rgba(6, 182, 212, 0.45);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  letter-spacing: 0.01em;
 }
 
 .btn-web-action:hover:not(:disabled) {
-  filter: brightness(1.1);
-  transform: translateY(-1px);
+  filter: brightness(1.15);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(6, 182, 212, 0.6);
+}
+
+.btn-web-action:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .btn-web-action:disabled {
-  opacity: 0.6;
+  opacity: 0.65;
   cursor: not-allowed;
+  filter: grayscale(0.2);
+}
+
+/* Multi-File Upload UI */
+.selected-files-container {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.files-summary-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px;
+}
+
+.files-count-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--accent-secondary);
+  background: rgba(6, 182, 212, 0.12);
+  border: 1px solid rgba(6, 182, 212, 0.25);
+  padding: 3px 10px;
+  border-radius: 6px;
+}
+
+.add-more-files-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--card-border);
+  color: var(--text-main);
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.add-more-files-btn:hover {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: var(--accent-primary);
+}
+
+.files-chips-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 /* References Footer (Perplexity / Gemini style) */

@@ -92,15 +92,17 @@ export default function AskKnowledge({ itemsCount, onWebItemIngested }) {
   };
 
   const handleWebSearchAndIngest = async () => {
-    if (!question.trim()) return;
+    const q = question.trim();
+    if (!q) return;
     setIsWebSearching(true);
     setError(null);
+    setAnswerText('Searching the live web for relevant documentation, ingesting into Knowledge Inbox, and synthesizing grounded answer with citations...');
 
     try {
-      const data = await searchWebAndAnswer(question.trim());
+      const data = await searchWebAndAnswer(q);
       setAnswerText(data.answer);
       setSources(data.sources || []);
-      setNeedsWebSearch(false);
+      setNeedsWebSearch(Boolean(data.needs_web_search));
 
       if (onWebItemIngested) {
         onWebItemIngested();
@@ -110,6 +112,24 @@ export default function AskKnowledge({ itemsCount, onWebItemIngested }) {
     } finally {
       setIsWebSearching(false);
     }
+  };
+
+  const isPositiveAnswer = () => {
+    if (!answerText || isStreaming || isWebSearching || needsWebSearch) return false;
+    const lower = answerText.toLowerCase();
+    if (
+      lower.includes("not enough information") ||
+      lower.includes("does not contain") ||
+      lower.includes("inbox is currently empty") ||
+      lower.includes("no relevant content") ||
+      lower.includes("encountered a temporary issue") ||
+      lower.includes("unable to complete") ||
+      lower.includes("please try again") ||
+      answerText.trim().length < 20
+    ) {
+      return false;
+    }
+    return true;
   };
 
   const copyToClipboard = () => {
@@ -249,8 +269,8 @@ export default function AskKnowledge({ itemsCount, onWebItemIngested }) {
             </div>
           )}
 
-          {/* References & Footnotes List */}
-          {sources.length > 0 && !isStreaming && (
+          {/* References & Footnotes List (Displayed ONLY on positive grounded answers) */}
+          {sources.length > 0 && isPositiveAnswer() && (
             <div className="references-footer">
               <div className="references-header">
                 <BookOpen size={15} color="var(--accent-secondary)" />
