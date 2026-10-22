@@ -26,8 +26,15 @@ from app.services.embeddings import (
     get_genai_client
 )
 
-# Prioritize gemini-3.8-flash first; seamlessly failover to 3.6/3.5 if free quota is exhausted (429)
-MODELS_PRIORITY = [settings.LLM_MODEL,"gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
+# Keep the configured model first, then try fallbacks without duplicate requests.
+# The configured model commonly defaults to gemini-3.8-flash, so a plain list
+# would otherwise call that model twice before moving to the next fallback.
+MODELS_PRIORITY = list(dict.fromkeys([
+    settings.LLM_MODEL,
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+]))
 
 
 async def ingest_content(
