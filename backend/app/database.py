@@ -1,5 +1,7 @@
 import json
 import sqlite3
+from contextlib import contextmanager
+from typing import Iterator
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
@@ -11,12 +13,16 @@ def get_db_path() -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return db_path
 
-def get_connection() -> sqlite3.Connection:
-    """Open a connection. Schema creation is explicit via init_db() at app startup."""
-    conn = sqlite3.connect(str(get_db_path()))
+@contextmanager
+def get_connection() -> Iterator[sqlite3.Connection]:
+    """Yield a configured connection and always close it after use."""
+    conn = sqlite3.connect(str(get_db_path()), timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def init_db():
     """Initialize database tables and indexes."""
