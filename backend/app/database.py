@@ -151,6 +151,29 @@ def get_item_by_id(item_id: str) -> Optional[Dict[str, Any]]:
             return None
         return dict(row)
 
+def get_item_by_url(url: str) -> Optional[Dict[str, Any]]:
+    """Retrieve an existing item by its source_url to prevent duplicate ingestion."""
+    if not url:
+        return None
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, source_type, source_url, title, raw_content, created_at 
+            FROM items 
+            WHERE source_url = ? 
+            ORDER BY created_at DESC 
+            LIMIT 1
+        """, (url.strip(),))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cursor.execute("SELECT COUNT(id) as chunk_count FROM chunks WHERE item_id = ?", (row["id"],))
+        c_row = cursor.fetchone()
+        res = dict(row)
+        res["chunk_count"] = c_row["chunk_count"] if c_row else 0
+        return res
+
+
 def get_all_chunks() -> List[Dict[str, Any]]:
     """Retrieve all chunks with deserialized embeddings and source item metadata."""
     with get_connection() as conn:

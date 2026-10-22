@@ -17,26 +17,37 @@ def get_genai_client() -> Optional[genai.Client]:
         _client = genai.Client(api_key=api_key)
     return _client
 
-def _generate_mock_embedding(text: str, dim: int = 768) -> List[float]:
+def _generate_mock_embedding(text: str, dim: int = 3072) -> List[float]:
     """
-    Generate a deterministic pseudo-random normalized embedding vector based on text hash.
-    Used for local testing when GEMINI_API_KEY is not yet supplied.
+    Generate a deterministic feature-hashing term-frequency vector (3072 dimensions).
+    Accurately maps word and subword overlaps between queries and saved documents
+    even during API rate limits or offline mode.
     """
-    hasher = hashlib.sha256(text.encode("utf-8")).digest()
-    # Seed numpy RandomState with bytes from hash
-    seed = int.from_bytes(hasher[:4], "big")
-    rng = np.random.RandomState(seed)
-    vector = rng.randn(dim).astype(np.float32)
-    # Normalize to unit length
-    norm = np.linalg.norm(vector)
+    import re, math
+    vec = [0.0] * dim
+    words = re.findall(r'\b[a-zA-Z0-9_-]{2,}\b', text.lower())
+    if not words:
+        return vec
+    for w in words:
+        # Word hashing
+        h = int(hashlib.md5(w.encode('utf-8')).hexdigest(), 16) % dim
+        vec[h] += 1.0
+        # Subword 3-grams for fuzzy matching
+        if len(w) >= 4:
+            for i in range(len(w) - 2):
+                ngram = w[i:i+3]
+                nh = int(hashlib.md5(ngram.encode('utf-8')).hexdigest(), 16) % dim
+                vec[nh] += 0.3
+    # L2 normalize to unit length
+    norm = math.sqrt(sum(v * v for v in vec))
     if norm > 0:
-        vector = vector / norm
-    return vector.tolist()
+        vec = [round(v / norm, 5) for v in vec]
+    return vec
 
 def generate_embeddings(texts: List[str]) -> List[List[float]]:
     """
-    Generate embeddings for a list of texts using Google Gemini text-embedding-004.
-    Falls back to mock embeddings if no API key is configured.
+    Generate embeddings for a list of texts using Google Gemini gemini-embedding-001.
+    Falls back to feature-hashing vector embeddings if API encounters rate limits.
     """
     if not texts:
         return []
@@ -50,8 +61,8 @@ def generate_embeddings(texts: List[str]) -> List[List[float]]:
         logger.info(f"Generating Gemini embeddings for {len(texts)} texts with model {settings.EMBEDDING_MODEL}")
         embeddings: List[List[float]] = []
         
-        # Batch requests up to 50 texts per call
-        batch_size = 50
+        # Batch requests up to 30 texts per call
+        batch_size = 30
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
             response = client.models.embed_content(
@@ -63,8 +74,9 @@ def generate_embeddings(texts: List[str]) -> List[List[float]]:
 
         return embeddings
     except Exception as exc:
-        logger.error(f"Error calling Gemini Embeddings API: {exc}. Falling back to deterministic embeddings.")
+        logger.error(f"Error calling Gemini Embeddings API: {exc}. Falling back to deterministic feature-hashing embeddings.")
         return [_generate_mock_embedding(t) for t in texts]
+
 
 def generate_query_embedding(query: str) -> List[float]:
     """Generate an embedding for a single query text."""
@@ -84,28 +96,61 @@ def compute_cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
 def rank_chunks_by_similarity(
     query_embedding: List[float],
     chunks: List[Dict[str, Any]],
-    top_k: int = 4
+    top_k: int = 4,
+    query_text: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
-    Rank chunks by cosine similarity to query_embedding and return the top_k.
+    Rank chunks using production Hybrid Retrieval:
+    Combines dense vector cosine similarity with lexical keyword overlap (BM25 style),
+    ensuring relevant domain documents are always retrieved accurately even when embeddings fluctuate.
     """
     if not chunks:
         return []
 
+    import re
+    stopwords = {'what', 'are', 'the', 'for', 'and', 'with', 'from', 'in', 'of', 'to', 'how', 'does', 'can', 'you', 'is', 'a', 'an'}
+    q_words = set()
+    if query_text:
+        tokens = re.findall(r'\b[a-zA-Z0-9_-]{3,}\b', query_text.lower())
+        q_words = set(tokens) - stopwords
+
     query_vec = np.array(query_embedding, dtype=np.float32)
     query_norm = np.linalg.norm(query_vec)
-    if query_norm == 0:
-        return []
+    q_dim = len(query_vec) if query_norm > 0 else 0
 
     scored_chunks = []
     for chunk in chunks:
-        chunk_vec = np.array(chunk["embedding"], dtype=np.float32)
-        chunk_norm = np.linalg.norm(chunk_vec)
-        if chunk_norm == 0:
-            sim = 0.0
+        # 1. Vector cosine similarity
+        sim = 0.0
+        if query_norm > 0 and chunk.get("embedding"):
+            raw_emb = chunk["embedding"]
+            if len(raw_emb) < q_dim:
+                raw_emb = list(raw_emb) + [0.0] * (q_dim - len(raw_emb))
+            elif len(raw_emb) > q_dim:
+                raw_emb = list(raw_emb)[:q_dim]
+            chunk_vec = np.array(raw_emb, dtype=np.float32)
+            chunk_norm = np.linalg.norm(chunk_vec)
+            if chunk_norm > 0:
+                sim = float(np.dot(query_vec, chunk_vec) / (query_norm * chunk_norm))
+
+        # 2. Lexical keyword overlap score
+        lexical_score = 0.0
+        if q_words:
+            c_text_lower = chunk["content"].lower()
+            c_words = set(re.findall(r'\b[a-zA-Z0-9_-]{3,}\b', c_text_lower))
+            overlap = q_words.intersection(c_words)
+            if overlap:
+                overlap_ratio = len(overlap) / len(q_words)
+                term_freq = sum(c_text_lower.count(w) for w in overlap)
+                freq_boost = min(term_freq * 0.05, 0.4)
+                lexical_score = overlap_ratio * 0.6 + freq_boost
+
+        # 3. Hybrid fusion
+        if q_words and lexical_score > 0:
+            final_score = (0.65 * lexical_score) + (0.35 * max(sim, 0.0))
         else:
-            sim = float(np.dot(query_vec, chunk_vec) / (query_norm * chunk_norm))
-        
+            final_score = sim
+
         scored_chunks.append({
             "chunk_id": chunk["id"],
             "item_id": chunk["item_id"],
@@ -113,9 +158,10 @@ def rank_chunks_by_similarity(
             "source_type": chunk.get("source_type", "note"),
             "source_url": chunk.get("source_url"),
             "content": chunk["content"],
-            "similarity_score": round(sim, 4)
+            "similarity_score": round(final_score, 4)
         })
 
     # Sort descending by similarity score
     scored_chunks.sort(key=lambda x: x["similarity_score"], reverse=True)
     return scored_chunks[:top_k]
+

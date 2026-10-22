@@ -8,7 +8,8 @@ from app.logging_config import logger
 from app.database import (
     save_item_with_chunks,
     get_all_chunks,
-    get_items
+    get_items,
+    get_item_by_url
 )
 from app.services.ingest import (
     process_note_content,
@@ -25,7 +26,7 @@ from app.services.embeddings import (
     get_genai_client
 )
 
-# Prioritize gemini-3.8-flash first; seamlessly failover if daily 20-request quota is exhausted (429)
+# Prioritize gemini-3.8-flash first; seamlessly failover to 3.6/3.5 if free quota is exhausted (429)
 MODELS_PRIORITY = [settings.LLM_MODEL,"gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
 
 
@@ -48,12 +49,19 @@ async def ingest_content(
     elif source_type == "url":
         if not url:
             raise IngestionError("URL is required for 'url' source_type.", status_code=400)
+        # Deduplication check: prevent adding duplicate items & chunks
+        existing_item = get_item_by_url(url)
+        if existing_item:
+            logger.info(f"URL '{url}' is already in Knowledge Inbox. Reusing item {existing_item['id']} to prevent duplicates.")
+            return existing_item
+
         if content and content.strip():
             title = custom_title or url
             clean_text = content.strip()
         else:
             title, clean_text = await fetch_url_content(url, custom_title)
         source_url = url
+
     elif source_type == "file":
         if not file_bytes or not filename:
             raise IngestionError("File content and filename are required for 'file' source_type.", status_code=400)
@@ -139,7 +147,7 @@ async def execute_rag_query(question: str, top_k: int = 4) -> Dict[str, Any]:
 
     # Embed query and rank
     query_emb = generate_query_embedding(question)
-    top_chunks = rank_chunks_by_similarity(query_emb, all_chunks, top_k=top_k)
+    top_chunks = rank_chunks_by_similarity(query_emb, all_chunks, top_k=top_k, query_text=question)
 
     if not top_chunks:
         return {
@@ -207,7 +215,7 @@ async def stream_rag_query(question: str, top_k: int = 4) -> AsyncGenerator[str,
         return
 
     query_emb = generate_query_embedding(question)
-    top_chunks = rank_chunks_by_similarity(query_emb, all_chunks, top_k=top_k)
+    top_chunks = rank_chunks_by_similarity(query_emb, all_chunks, top_k=top_k, query_text=question)
 
     # First emit retrieved sources
     yield f"event: sources\ndata: {json.dumps(top_chunks)}\n\n"
