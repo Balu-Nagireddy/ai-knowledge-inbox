@@ -1,254 +1,385 @@
-# AI Knowledge Inbox 📥 🧠
+# AI Knowledge Inbox 📥🧠
 
-A production-style minimal web application that lets users save plain text notes and web URLs, indexes them with semantic vector embeddings, and answers user questions grounded in their saved content using a Retrieval-Augmented Generation (RAG) pipeline powered by Google Gemini.
+A local-first knowledge capture and question-answering app. Save notes, web pages, and supported documents; split content into overlapping chunks; index the chunks with embeddings; and ask questions against your saved knowledge using a Retrieval-Augmented Generation (RAG) pipeline.
 
----
+The project combines a **FastAPI** backend, a **React + Vite** frontend, **SQLite** persistence, **NumPy** similarity calculations, and the **Google Gen AI SDK**. It also includes a deterministic local fallback for development when the Gemini API is not configured or an embedding request fails.
 
-## 🚀 Key Features
+> **Project status:** a single-process, local-first application intended for experimentation and small personal knowledge collections. It is not yet a hardened, multi-user production service. See [DESIGN_TRADEOFFS.md](./DESIGN_TRADEOFFS.md) for current limitations, security considerations, and a practical scaling path.
 
-1. **Dual Ingestion Engine**:
-   - **Plain Notes**: Fast text ingestion with automatic title deduction from header or first line.
-   - **Server-Side URL Fetcher**: Scrapes remote web pages, strips boilerplate (scripts, styles, headers, nav, footers), extracts clean readable body content, and resolves titles.
-2. **Intentional Boundary-Aware Chunking**:
-   - Recursive character chunking respecting paragraph breaks, sentence boundaries (`. `, `! `, `? `), and word boundaries with a configurable 100-character overlap.
-3. **Semantic Vector Search**:
-   - High-dimensional vector embeddings using Google Gemini `text-embedding-004`.
-   - SQLite persistent storage with fast vectorized cosine similarity ranking via NumPy.
-4. **Grounded RAG Q&A Pipeline**:
-   - Context-grounded prompting with anti-hallucination guardrails.
-   - Synthesizes accurate responses with explicit source citations and similarity scores.
-5. **Modern, Responsive Frontend**:
-   - Built with React, Vite, and Lucide icons.
-   - Glassmorphic interface with status indicators, tabbed ingestion, inbox management, and interactive query cards.
-6. **Graceful Demo Mode**:
-   - If `GEMINI_API_KEY` is not provided, the application runs in a deterministic fallback mode without crashing.
+## Contents
 
----
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Technology stack](#technology-stack)
+- [Repository layout](#repository-layout)
+- [Requirements](#requirements)
+- [Run locally](#run-locally)
+- [Configuration](#configuration)
+- [API reference](#api-reference)
+- [Testing](#testing)
+- [Known limitations and security notes](#known-limitations-and-security-notes)
+- [Design decisions](#design-decisions)
 
-## 🏗️ Architecture & Building Blocks
+## Features
 
+- **Capture notes:** save plain text with an optional title. If no title is supplied, the first line is used to derive one.
+- **Save web pages:** fetch a URL server-side, remove common non-content HTML elements, and extract readable text and a page title.
+- **Upload documents:** ingest a single file or multiple files. The parser handles PDF, DOCX, Markdown, text, and selected text-based formats.
+- **Chunking with overlap:** split content with a recursive separator strategy that prefers paragraph, line, sentence, and word boundaries.
+- **Embedding generation:** use the configured Gemini embedding model; use deterministic feature-hashing vectors when the API is not configured or an embedding call fails.
+- **Hybrid retrieval:** rank stored chunks with a combination of cosine similarity and a lightweight lexical-overlap score.
+- **Grounded Q&A:** send the top retrieved excerpts to Gemini with instructions to answer from the supplied context and cite sources.
+- **Streaming answers:** expose an SSE endpoint so the UI can show answer text as it arrives.
+- **Optional web-assisted answers:** search for a small number of public web results, ingest fetched articles into the inbox, then query the enriched collection.
+- **Persistent local storage:** store item metadata, raw extracted text, chunk text, and serialized embeddings in SQLite.
+- **Inbox management:** list saved items and delete an item with its associated chunks.
+
+## How it works
+
+```text
+                         ┌─────────────────────────┐
+                         │     React + Vite UI     │
+                         └────────────┬────────────┘
+                                      │ HTTP / SSE
+                                      ▼
+                         ┌─────────────────────────┐
+                         │      FastAPI API        │
+                         └────────────┬────────────┘
+                                      │
+                     ┌────────────────┼─────────────────┐
+                     ▼                ▼                 ▼
+              Note / URL / File   Query / RAG      Web-assisted query
+                     │                │                 │
+                     ▼                ▼                 ▼
+              Parse and clean    Embed question    Search + fetch pages
+                     │                │                 │
+                     ▼                ▼                 ▼
+               Chunk content    Rank all chunks    Ingest fetched content
+                     │          (dense + lexical)        │
+                     ▼                │                 │
+                Embed chunks          └────────┬────────┘
+                     │                          │
+                     ▼                          ▼
+               ┌────────────────────────────────────┐
+               │ SQLite: items, chunks, embeddings  │
+               └───────────────────┬────────────────┘
+                                   │
+                                   ▼
+                         Gemini answer generation
+                         (or retrieval-only fallback)
 ```
-AI_Knowledge_Inbox/
+
+### Ingestion flow
+
+1. Validate the incoming note, URL, or upload request.
+2. Extract and normalize text. URL extraction removes common boilerplate elements; file extraction depends on the supported format.
+3. Split the extracted text using configurable character limits and overlap.
+4. Generate embeddings in batches (up to 30 texts per embedding request in the current implementation), or deterministic fallback vectors.
+5. Persist the item and its chunks in SQLite.
+
+Repeated URL ingestion is deduplicated by exact stored URL string. This is not canonical URL normalization.
+
+### Query flow
+
+1. Load stored chunks and their embeddings from SQLite.
+2. Generate an embedding for the question, with the same provider/fallback selection as ingestion.
+3. Score all chunks using cosine similarity and, when query terms overlap with a chunk, a lightweight lexical-overlap component.
+4. Return the top `top_k` chunks as sources.
+5. If a Gemini client is available, submit the question and retrieved excerpts to the configured LLM model with fallback model attempts. Without a client, return a deterministic retrieval-only demo message rather than an LLM-generated answer.
+
+**Important:** a similarity score is a retrieval ranking signal, not a calibrated probability that a source is correct. Citations and prompt instructions help grounding but do not guarantee factual correctness.
+
+## Technology stack
+
+| Layer | Technology | Purpose |
+|---|---|---|
+| API | Python, FastAPI, Uvicorn | REST endpoints and streaming responses |
+| Validation / settings | Pydantic v2, Pydantic Settings | Request validation and environment configuration |
+| Persistence | SQLite, Python `sqlite3` | Item metadata, content, chunk records, and serialized vectors |
+| Retrieval | NumPy | Cosine similarity and vector operations |
+| Ingestion | HTTPX, BeautifulSoup4 | HTTP fetching and HTML text extraction |
+| File parsing | pypdf, python-docx | PDF and DOCX text extraction |
+| AI integration | Google Gen AI SDK | Embeddings and answer generation |
+| Frontend | React, Vite, React Markdown, Lucide React | Interactive inbox and Q&A interface |
+| Tests | pytest, FastAPI TestClient | Service, database, and API tests |
+
+The default model names are read from `backend/.env.example`. Model availability and quotas depend on the Google AI account and may change over time.
+
+## Repository layout
+
+```text
+ai-knowledge-inbox/
 ├── backend/
 │   ├── app/
-│   │   ├── config.py             # Pydantic Settings & environment variables
-│   │   ├── database.py           # SQLite connection, schema & transactional repository
-│   │   ├── logging_config.py     # Structured logging configuration
-│   │   ├── models.py / schemas.py# Pydantic v2 schemas for request/response validation
-│   │   ├── services/
-│   │   │   ├── ingest.py         # URL fetcher, HTML sanitizer & note parser
-│   │   │   ├── chunker.py        # Recursive semantic chunker with overlap
-│   │   │   ├── embeddings.py     # Gemini embeddings & NumPy cosine similarity engine
-│   │   │   └── rag.py            # RAG orchestration & prompt generation
-│   │   └── main.py               # FastAPI application, CORS & REST endpoints
-│   ├── tests/                    # Comprehensive Pytest suite (database, services, API)
-│   ├── requirements.txt
-│   └── .env.example
+│   │   ├── config.py               # Environment-backed settings
+│   │   ├── database.py             # SQLite schema and data-access functions
+│   │   ├── logging_config.py       # Application logging
+│   │   ├── main.py                 # FastAPI routes and lifecycle
+│   │   ├── schemas.py              # Pydantic request/response schemas
+│   │   └── services/
+│   │       ├── chunker.py          # Recursive text splitting
+│   │       ├── embeddings.py       # Gemini/fallback embeddings and ranking
+│   │       ├── ingest.py           # Notes, URLs, files, and web search helpers
+│   │       └── rag.py              # Ingestion and RAG orchestration
+│   ├── tests/
+│   │   ├── conftest.py             # Test database configuration
+│   │   ├── test_api.py             # API integration tests
+│   │   ├── test_database.py        # SQLite lifecycle tests
+│   │   └── test_services.py        # Chunking, ingestion, and retrieval tests
+│   ├── .env.example
+│   ├── pytest.ini
+│   └── requirements.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── api.js                # Clean API client wrapper
-│   │   ├── components/
-│   │   │   ├── Header.jsx        # App header & status indicators
-│   │   │   ├── IngestBox.jsx     # Tabbed note & URL ingestion form
-│   │   │   ├── KnowledgeInbox.jsx# Saved items feed with badges & actions
-│   │   │   └── AskKnowledge.jsx  # Semantic search & cited answer viewer
-│   │   ├── App.jsx               # Application state orchestration
-│   │   └── index.css             # Design tokens & glassmorphic styles
+│   │   ├── components/             # Header, ingestion, inbox, and query UI
+│   │   ├── api.js                  # Backend API client
+│   │   ├── App.jsx
+│   │   └── index.css
 │   ├── package.json
 │   └── vite.config.js
-├── README.md                     # Setup instructions & project documentation
-└── DESIGN_TRADEOFFS.md           # In-depth architectural tradeoffs & scaling analysis
+├── run_backend.bat                 # Windows backend launcher (expects backend/venv)
+├── run_backend.sh                  # Shell launcher (see note below)
+├── run_frontend.bat                # Windows frontend launcher
+├── run_frontend.sh                 # Shell frontend launcher
+├── README.md
+└── DESIGN_TRADEOFFS.md
 ```
 
+## Requirements
+
+- Python 3.10 or newer (Python 3.12 is a reasonable baseline for this project)
+- Node.js compatible with the Vite version pinned by the lockfile; use a current supported Node.js LTS release
+- npm
+- A Google Gemini API key for live embedding and LLM features (optional for local fallback/demo behavior)
+- Internet access for Gemini calls, URL ingestion, and web-assisted queries
+
+## Run locally
+
+Run the backend and frontend in separate terminals from the repository root.
+
+### 1. Backend setup
+
+**Windows PowerShell**
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+If PowerShell blocks activation, you can call the environment's interpreter directly instead:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+**macOS / Linux**
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `backend/.env` and set your Google AI API key. A key is optional for deterministic local fallback behavior, but live Gemini generation will not be available without a valid key.
+
+Start the API from the `backend/` directory:
+
+```bash
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+The backend initializes the SQLite schema at application startup. By default, the database path resolves to `backend/data/knowledge_inbox.db`.
+
+- API: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+- Swagger UI: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- Health endpoint: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+
+### 2. Frontend setup
+
+Open a second terminal from the repository root:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Vite prints the local development URL, normally [http://localhost:5173](http://localhost:5173).
+
+The frontend defaults to `http://127.0.0.1:8000` for its API. To use a different backend, create `frontend/.env.local` with:
+
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+Restart Vite after changing frontend environment variables.
+
+### 3. Optional launcher scripts
+
+The `run_backend.bat` script assumes an environment at `backend/venv`. The manual setup above creates `backend/.venv`, so either update the launcher to match your chosen environment directory or use the manual command.
+
+The checked-in `run_backend.sh` currently refers to `venv/Scripts/python`, which is a Windows-style path and is not a portable macOS/Linux launcher. Use the manual commands above on Unix-like systems unless that script is corrected.
+
+## Configuration
+
+Settings are loaded from `backend/.env` and can also be supplied as environment variables.
+
+| Variable | Default in repository | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | Empty in code; placeholder in example | Google AI API key. Leave empty for fallback mode. |
+| `LLM_MODEL` | `gemini-3.8-flash` | Preferred answer-generation model; additional fallback model names are configured in `rag.py`. |
+| `EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model used for document and query embeddings. |
+| `DATABASE_PATH` | `./data/knowledge_inbox.db` in the example, resolved relative to the process working directory; code default is backend data path | SQLite database file path. Prefer an absolute path in deployment. |
+| `CHUNK_SIZE` | `500` | Target maximum character size used by the recursive splitter. |
+| `CHUNK_OVERLAP` | `100` | Overlap seed length between chunks. Boundary logic can affect exact output size. |
+| `TOP_K` | `4` | Configured default for retrieval. The API schema also defaults `top_k` to 4 and accepts values 1–10. |
+| `HOST` | `127.0.0.1` | Host setting in configuration; launcher/manual commands must explicitly use the intended host. |
+| `PORT` | `8000` | Port setting in configuration; launcher/manual commands must explicitly use the intended port. |
+| `LOG_LEVEL` | `INFO` | Log-level setting. |
+
+Do not commit `backend/.env`, API keys, or real user documents. Use secret management rather than checked-in environment files for any hosted deployment.
+
+## API reference
+
+FastAPI's interactive schema is available at `/docs`. The routes below are implemented in `backend/app/main.py`.
+
+| Method | Endpoint | Purpose | Successful response |
+|---|---|---|---|
+| `GET` | `/health` | Report service/model configuration | `200 OK` |
+| `POST` | `/ingest` | Save a note or fetch and save a URL | `201 Created` |
+| `POST` | `/ingest/file` | Upload one file | `201 Created` |
+| `POST` | `/ingest/files` | Upload multiple files; response contains successful files and chunk total | `201 Created` for successful/partial batch results |
+| `GET` | `/items` | List items, raw text, chunk count, and creation time | `200 OK` |
+| `DELETE` | `/items/{item_id}` | Delete item and related chunks | `200 OK`; `404` if missing |
+| `POST` | `/query` | Retrieve sources and return a RAG answer | `200 OK` |
+| `POST` | `/query/stream` | Stream source and token events using SSE | `200 OK`, `text/event-stream` |
+| `POST` | `/query/web-search` | Search/fetch public pages, ingest results, and query again | `200 OK` |
+
+### Ingest a note
+
+Request:
+
+```http
+POST /ingest
+Content-Type: application/json
+```
+
+```json
+{
+  "source_type": "note",
+  "title": "React Server Components",
+  "content": "React Server Components can reduce client-side JavaScript because components can execute on the server."
+}
+```
+
+`title` is optional. When omitted, the title is derived from the first line of the note.
+
+### Ingest a URL
+
+```json
+{
+  "source_type": "url",
+  "url": "https://fastapi.tiangolo.com/",
+  "title": "FastAPI Documentation"
+}
+```
+
+The backend fetches the URL and extracts readable text. Only `http://` and `https://` prefixes are accepted by the request schema. This prefix validation alone is not a complete SSRF defense; see the security notes below.
+
+### Upload files
+
+For a single file, send multipart form data to `POST /ingest/file` with a `file` field and optional `title` field. For multiple files, send repeated `files` fields to `POST /ingest/files`.
+
+Current parser behavior:
+- PDF: extracts text with pypdf; scanned/image-only PDFs may yield no text.
+- DOCX: extracts paragraph text with python-docx.
+- Text-like extensions: includes `.txt`, `.md`, `.csv`, `.json`, `.py`, `.js`, and `.html`.
+- Other formats may be attempted as UTF-8 text, so extension allowlisting and upload-size limits should be added before exposure to untrusted users.
+
+### Ask a question
+
+```http
+POST /query
+Content-Type: application/json
+```
+
+```json
+{
+  "question": "What do my notes say about React Server Components?",
+  "top_k": 4
+}
+```
+
+The response includes `question`, `answer`, `sources`, and `needs_web_search`. Each source contains the chunk and item identifiers, title/type, optional URL, excerpt content, and a ranking score called `similarity_score`.
+
+### Streaming Q&A
+
+`POST /query/stream` accepts the same request body as `/query` and returns SSE events:
+
+- `sources`: JSON array of retrieved source snippets.
+- `token`: JSON-encoded text pieces.
+- `done`: terminal event with `[DONE]`.
+
+The browser client reads the response stream and appends tokens as received. The stream endpoint does not currently emit a dedicated structured error event.
+
+### Web-assisted question
+
+`POST /query/web-search` accepts:
+
+```json
+{
+  "question": "What is new in FastAPI?"
+}
+```
+
+It attempts to discover and fetch up to two public web pages, ingests fetched text into the same persistent inbox, then runs retrieval and answer generation. This is an opt-in route from the UI, but results depend on third-party search/page behavior and network availability. The source code performs network requests and should not be exposed publicly without SSRF protections, timeouts/rate limits, and abuse controls.
+
+## Testing
+
+From the repository root:
+
+```bash
+cd backend
+python -m pytest
+```
+
+The test suite covers API health, note ingestion/query/deletion, validation errors, streaming response headers, file and batch ingestion, SQLite item/chunk lifecycle, note-title handling, text chunking, and embedding/ranking behavior.
+
+**Current test caveat:** `backend/tests/test_services.py` expects the fallback embedding vector length to be 768, but `backend/app/services/embeddings.py` creates fallback vectors with a default length of 3072. The embedding model's returned dimension may also differ from the fallback dimension. Run the suite in your environment and resolve this mismatch before treating the suite as green. The repository was reviewed statically for this README; the test suite was not executed as part of this documentation update.
+
+## Known limitations and security notes
+
+- **Single-user/local-first:** there is no authentication, authorization, per-user data isolation, or tenant model.
+- **Broad CORS:** the API currently allows all origins, methods, and headers while also enabling credentials. Restrict origins and methods before any deployment.
+- **URL fetching and SSRF:** scheme checks do not block loopback, private-network, link-local, or cloud metadata targets; redirects can also change destinations. Do not expose URL ingestion or web search to untrusted clients until network-level URL validation and redirect checks are implemented.
+- **Uploads:** the current API reads uploaded bytes into memory and has no explicit size/count limits. Add size limits, extension/content validation, and resource quotas.
+- **External dependencies:** content fetching, web search, Gemini API quotas, and model availability can fail or change.
+- **Fallback is not equivalent to Gemini:** feature hashing provides lexical/subword similarity, not a semantic embedding model; fallback Q&A retrieves content but does not synthesize a grounded natural-language answer.
+- **Embedding-space consistency:** vectors created by different models or fallback implementations should not be mixed. When changing embedding models or dimensions, re-embed existing chunks or version the embedding space.
+- **Retrieval scalability:** each query loads all chunks from SQLite and ranks them in-process. There is no ANN index, background queue, or semantic cache.
+- **SQLite concurrency:** suitable for a small local workload, but concurrent writes and multi-process deployments need careful handling.
+- **Document extraction:** image-only PDFs and complex page layouts may need OCR or a more capable extraction pipeline.
+- **Operational controls:** production use needs explicit limits, authentication, tighter error responses, metrics/tracing, backups, and a deployment strategy for persistent storage.
+
+## Design decisions
+
+This project intentionally keeps the current architecture simple for local development and review. The principal choices and their tradeoffs are documented in [DESIGN_TRADEOFFS.md](./DESIGN_TRADEOFFS.md).
+
+In short:
+- SQLite avoids a separate database service and makes local setup straightforward.
+- Character-based recursive chunking is inexpensive and tunable, although it is less language-aware than token- or semantic-based chunking.
+- NumPy full-scan ranking is easy to inspect and adequate for small collections, but its cost grows with the number of chunks.
+- Gemini provides embedding and generation quality when available, while a deterministic fallback lets the rest of the workflow be exercised without an API key.
+
 ---
 
-## 🛠️ Tech Stack
+## License
 
-- **Backend**: Python 3.12, FastAPI, Pydantic v2, SQLite3, NumPy, BeautifulSoup4, HTTPX, Google GenAI SDK.
-- **Frontend**: React 19, Vite, Lucide React, Modern CSS (Glassmorphism, Flex/Grid).
-- **AI / LLM**: Google Gemini (`gemini-2.0-flash` or `gemini-1.5-flash`), `text-embedding-004`.
-
----
-
-## 🏁 Getting Started (Local Setup)
-
-### Prerequisites
-- **Python 3.10+** (Tested on Python 3.12)
-- **Node.js 18+** (Tested on Node v24)
-- **Google Gemini API Key** (Get one free at [Google AI Studio](https://aistudio.google.com/))
-
----
-
-### Step 1: Backend Setup
-
-1. Open a terminal and navigate to the backend directory:
-   ```bash
-   cd backend
-   ```
-
-2. Create and activate a Python virtual environment:
-   - **Windows**:
-     ```powershell
-     python -m venv venv
-     .\venv\Scripts\activate
-     ```
-   - **macOS / Linux**:
-     ```bash
-     python3 -m venv venv
-     source venv/bin/activate
-     ```
-
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Configure your environment variables:
-   - Copy `.env.example` to `.env`:
-     ```bash
-     cp .env.example .env
-     ```
-   - Open `.env` and add your `GEMINI_API_KEY`:
-     ```env
-     GEMINI_API_KEY=your_actual_gemini_api_key_here
-     LLM_MODEL=gemini-2.0-flash
-     EMBEDDING_MODEL=text-embedding-004
-     ```
-
-5. Run unit and integration tests:
-   ```bash
-   pytest
-   ```
-   *(All 8 tests should pass)*
-
-6. Start the FastAPI server:
-   ```bash
-   uvicorn app.main:app --reload --port 8000
-   ```
-   *The backend will be live at `http://127.0.0.1:8000`. Interactive OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.*
-
----
-
-### Step 2: Frontend Setup
-
-1. Open a second terminal and navigate to the frontend directory:
-   ```bash
-   cd frontend
-   ```
-
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Start the development server:
-   ```bash
-   npm run dev
-   ```
-
-4. Open `http://localhost:5173` in your browser.
-
----
-
-## 📡 API Reference
-
-### 1. Ingest Content
-`POST /ingest`
-- **Request Body (Note)**:
-  ```json
-  {
-    "source_type": "note",
-    "title": "React Server Components",
-    "content": "RSCs execute solely on the server and do not increase client bundle size."
-  }
-  ```
-- **Request Body (URL)**:
-  ```json
-  {
-    "source_type": "url",
-    "url": "https://fastapi.tiangolo.com/"
-  }
-  ```
-- **Response** (`201 Created`):
-  ```json
-  {
-    "id": "c1f7b82e-9d2a-4f51-bfa6-1e5b4f849e77",
-    "source_type": "note",
-    "title": "React Server Components",
-    "source_url": null,
-    "chunk_count": 1,
-    "created_at": "2026-10-22T06:15:00.000000+00:00"
-  }
-  ```
-
-### 2. List Saved Items
-`GET /items`
-- **Response** (`200 OK`):
-  ```json
-  [
-    {
-      "id": "c1f7b82e-9d2a-4f51-bfa6-1e5b4f849e77",
-      "source_type": "note",
-      "source_url": null,
-      "title": "React Server Components",
-      "raw_content": "RSCs execute solely on the server...",
-      "chunk_count": 1,
-      "created_at": "2026-10-22T06:15:00.000000+00:00"
-    }
-  ]
-  ```
-
-### 3. Ask Semantic Query (RAG)
-`POST /query`
-- **Request Body**:
-  ```json
-  {
-    "question": "What are the bundle size advantages of React Server Components?",
-    "top_k": 4
-  }
-  ```
-- **Response** (`200 OK`):
-  ```json
-  {
-    "question": "What are the bundle size advantages of React Server Components?",
-    "answer": "React Server Components execute entirely on the server and therefore do not add any JavaScript to the client-side bundle [Source 1].",
-    "sources": [
-      {
-        "chunk_id": "8fa3c09b-...",
-        "item_id": "c1f7b82e-...",
-        "source_title": "React Server Components",
-        "source_type": "note",
-        "source_url": null,
-        "content": "RSCs execute solely on the server and do not increase client bundle size.",
-        "similarity_score": 0.8921
-      }
-    ]
-  }
-  ```
-
-### 4. System Health Check
-`GET /health`
-- **Response** (`200 OK`):
-  ```json
-  {
-    "status": "healthy",
-    "service": "AI Knowledge Inbox",
-    "gemini_api_configured": true,
-    "models": {
-      "llm": "gemini-2.0-flash",
-      "embeddings": "text-embedding-004"
-    }
-  }
-  ```
-
----
-
-## ⚖️ Tradeoffs & System Design
-
-For a comprehensive analysis of:
-- **Chunking Strategy Rationale**
-- **Vector Store Selection**
-- **What Breaks at Scale**
-- **Production Architecture & Queue Roadmap**
-
-👉 **Read the full [DESIGN_TRADEOFFS.md](file:///c:/Users/s5cd3/Assignment/AI_Knowledge_Inbox/DESIGN_TRADEOFFS.md)**.
+No license file is currently present in the repository. Unless a license is added, treat the repository as having all rights reserved rather than assuming it is open source.
