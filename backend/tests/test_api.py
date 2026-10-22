@@ -99,3 +99,10 @@ def test_file_upload_size_limit():
         files={"file": ("large.txt", oversized, "text/plain")},
     )
     assert response.status_code == 413
+
+def test_gemini_model_fallback_has_no_duplicates():
+    # Avoid sending duplicate requests when the configured model is also a fallback.
+    from app.services.rag import MODELS_PRIORITY
+
+    assert MODELS_PRIORITY
+    assert len(MODELS_PRIORITY) == len(set(MODELS_PRIORITY))
