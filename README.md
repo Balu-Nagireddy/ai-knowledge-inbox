@@ -143,7 +143,6 @@ ai-knowledge-inbox/
 ├── run_backend.bat / run_backend.sh # Backend launchers (use backend/.venv)
 ├── run_frontend.bat / run_frontend.sh # Frontend launchers
 ├── LICENSE
-├── .github/workflows/ci.yml        # Backend tests and frontend build
 ├── README.md
 └── DESIGN_TRADEOFFS.md
 ```
@@ -398,14 +397,13 @@ The test suite covers API health, note ingestion/query/deletion, validation erro
 
 The test no longer hard-codes an embedding dimension. Vector similarity now returns zero for mismatched dimensions, and retrieval does not pad/truncate vectors across embedding spaces. This avoids invalid comparisons but does not automatically re-embed old data: if switching between Gemini and fallback embeddings, delete/rebuild the local index before relying on vector ranking. Lexical ranking can still contribute when vectors are incompatible.
 
-A GitHub Actions workflow in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) installs backend dependencies, runs pytest without a Gemini key, and builds the frontend. Check the Actions tab for the actual run status. Do not treat the workflow as passing until GitHub reports both jobs successful.
 
 ## Known limitations and security notes
 
 - **Single-user/local-first:** there is no authentication, authorization, per-user data isolation, or tenant model.
 - **CORS:** allowed origins are now configurable through `CORS_ORIGINS` and default to the two local Vite origins; credentials are disabled. Configure the exact production frontend origin before deployment.
-- **URL fetching and SSRF:** scheme checks do not block loopback, private-network, link-local, or cloud metadata targets; redirects can also change destinations. Do not expose URL ingestion or web search to untrusted clients until network-level URL validation and redirect checks are implemented.
-- **Uploads:** single files are capped at 10 MiB and batches at 10 files. Files are read with a bounded read, but strict extension/content-type validation, a total batch-byte budget, and parser resource isolation are still recommended.
+- **URL fetching and SSRF:** URL ingestion rejects non-HTTP(S) schemes, credentials, non-standard ports, and hosts resolving to non-public IP addresses. Redirect destinations are revalidated. DNS rebinding and validation-to-connection races are still possible; keep this local-only unless outbound network access is restricted at the infrastructure layer.
+- **Uploads:** single files are capped at 10 MiB and a batch may contain at most 10 files. There is not yet a total batch-byte budget, strict extension/content-type allowlisting, or parser resource isolation.
 - **External dependencies:** content fetching, web search, Gemini API quotas, and model availability can fail or change.
 - **Fallback is not equivalent to Gemini:** feature hashing provides lexical/subword similarity, not a semantic embedding model; fallback Q&A retrieves content but does not synthesize a grounded natural-language answer.
 - **Embedding-space consistency:** vectors created by different models or fallback implementations should not be mixed. When changing embedding models or dimensions, re-embed existing chunks or version the embedding space.
