@@ -1,13 +1,30 @@
-import React, { useState } from 'react';
-import { Sparkles, Send, Loader2, BookOpen, Copy, Check, AlertCircle, Quote } from 'lucide-react';
-import { queryKnowledge } from '../api';
+import React, { useState, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import {
+  Sparkles,
+  Send,
+  Loader2,
+  BookOpen,
+  Copy,
+  Check,
+  AlertCircle,
+  ExternalLink,
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  Globe,
+  Quote
+} from 'lucide-react';
+import { queryKnowledgeStream, queryKnowledge } from '../api';
 
 export default function AskKnowledge({ itemsCount }) {
   const [question, setQuestion] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [answerText, setAnswerText] = useState('');
+  const [sources, setSources] = useState([]);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [expandedSourceIdx, setExpandedSourceIdx] = useState(null);
 
   const sampleQuestions = [
     "What key concepts are covered in my notes?",
@@ -20,24 +37,52 @@ export default function AskKnowledge({ itemsCount }) {
     if (!q) return;
 
     setError(null);
-    setLoading(true);
-    setResult(null);
+    setIsStreaming(true);
+    setAnswerText('');
+    setSources([]);
+    setExpandedSourceIdx(null);
 
     try {
-      const data = await queryKnowledge(q, 4);
-      setResult(data);
+      // Use real-time streaming endpoint
+      await queryKnowledgeStream(q, 4, {
+        onSources: (retrievedSources) => {
+          setSources(retrievedSources || []);
+        },
+        onToken: (token) => {
+          setAnswerText((prev) => prev + token);
+        },
+        onDone: () => {
+          setIsStreaming(false);
+        },
+        onError: async (err) => {
+          console.warn('Streaming error, falling back to standard query:', err);
+          // Fallback to standard POST /query
+          try {
+            const data = await queryKnowledge(q, 4);
+            setAnswerText(data.answer);
+            setSources(data.sources || []);
+          } catch (fallbackErr) {
+            setError(fallbackErr.message || 'Failed to retrieve answer');
+          } finally {
+            setIsStreaming(false);
+          }
+        }
+      });
     } catch (err) {
-      setError(err.message || 'Failed to retrieve answer');
-    } finally {
-      setLoading(false);
+      setError(err.message || 'Failed to execute query');
+      setIsStreaming(false);
     }
   };
 
   const copyToClipboard = () => {
-    if (!result?.answer) return;
-    navigator.clipboard.writeText(result.answer);
+    if (!answerText) return;
+    navigator.clipboard.writeText(answerText);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const toggleSourceExpand = (idx) => {
+    setExpandedSourceIdx(expandedSourceIdx === idx ? null : idx);
   };
 
   return (
@@ -50,7 +95,7 @@ export default function AskKnowledge({ itemsCount }) {
       </div>
 
       <p style={{ fontSize: '0.86rem', color: 'var(--text-muted)' }}>
-        Ask any question across your entire saved inbox. The RAG pipeline embeds your query, retrieves the most relevant chunks via cosine similarity, and synthesizes an answer grounded in cited sources.
+        Ask any question across your knowledge inbox. The pipeline retrieves the most relevant chunks via vector similarity and synthesizes a grounded answer powered by Gemini with footnote citations.
       </p>
 
       {error && (
@@ -65,23 +110,27 @@ export default function AskKnowledge({ itemsCount }) {
           <input
             type="text"
             className="query-input"
-            placeholder={itemsCount > 0 ? "Ask a question about your saved knowledge..." : "Add items to your inbox first, then ask anything..."}
+            placeholder={
+              itemsCount > 0
+                ? "Ask a question about your saved knowledge..."
+                : "Add notes or URLs above first, then ask anything..."
+            }
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            disabled={loading}
+            disabled={isStreaming}
           />
           <button
             type="submit"
             className="btn-ask"
-            disabled={loading || !question.trim()}
+            disabled={isStreaming || !question.trim()}
           >
-            {loading ? <Loader2 size={18} className="spinner" /> : <Send size={18} />}
-            <span>Ask</span>
+            {isStreaming ? <Loader2 size={18} className="spinner" /> : <Send size={18} />}
+            <span>{isStreaming ? 'Thinking...' : 'Ask'}</span>
           </button>
         </div>
       </form>
 
-      {/* Suggested Questions */}
+      {/* Suggested prompts */}
       <div className="suggestions-row">
         {sampleQuestions.map((sq, i) => (
           <button
@@ -89,15 +138,15 @@ export default function AskKnowledge({ itemsCount }) {
             type="button"
             className="suggestion-pill"
             onClick={() => { setQuestion(sq); handleAsk(sq); }}
-            disabled={loading}
+            disabled={isStreaming}
           >
             "{sq}"
           </button>
         ))}
       </div>
 
-      {/* Answer and Citations View */}
-      {result && (
+      {/* Answer & Clean References Footnotes View */}
+      {(answerText || isStreaming) && (
         <div className="answer-panel">
           <div className="answer-header">
             <span className="answer-badge">
@@ -105,51 +154,93 @@ export default function AskKnowledge({ itemsCount }) {
               Grounded AI Response
             </span>
 
-            <button
-              type="button"
-              className="suggestion-pill"
-              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-              onClick={copyToClipboard}
-              title="Copy Answer"
-            >
-              {copied ? <Check size={14} color="var(--accent-emerald)" /> : <Copy size={14} />}
-              <span>{copied ? 'Copied' : 'Copy'}</span>
-            </button>
+            {answerText && (
+              <button
+                type="button"
+                className="suggestion-pill"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                onClick={copyToClipboard}
+                title="Copy Answer"
+              >
+                {copied ? <Check size={14} color="var(--accent-emerald)" /> : <Copy size={14} />}
+                <span>{copied ? 'Copied' : 'Copy'}</span>
+              </button>
+            )}
           </div>
 
-          <div className="answer-body">{result.answer}</div>
+          {/* Real-time Markdown Answer Body */}
+          <div className="markdown-answer-body">
+            <ReactMarkdown>{answerText}</ReactMarkdown>
+            {isStreaming && <span className="typing-cursor"></span>}
+          </div>
 
-          {result.sources && result.sources.length > 0 && (
-            <div className="sources-section">
-              <div className="sources-title">
-                <BookOpen size={15} />
-                Cited Sources ({result.sources.length})
+          {/* References & Footnotes List */}
+          {sources.length > 0 && !isStreaming && (
+            <div className="references-footer">
+              <div className="references-header">
+                <BookOpen size={15} color="var(--accent-secondary)" />
+                <span>References & Cited Sources ({sources.length})</span>
               </div>
 
-              <div className="source-cards-grid">
-                {result.sources.map((src, idx) => (
-                  <div key={idx} className="source-card">
-                    <div className="source-card-header">
-                      <span className="source-card-title" title={src.source_title}>
-                        [{idx + 1}] {src.source_title}
-                      </span>
-                      <span className="score-badge" title="Cosine similarity score">
-                        {(src.similarity_score * 100).toFixed(1)}% match
-                      </span>
-                    </div>
+              <div className="references-list">
+                {sources.map((src, idx) => {
+                  const isExpanded = expandedSourceIdx === idx;
+                  const scorePct = (src.similarity_score * 100).toFixed(1);
 
-                    <div className="source-card-content">
-                      <Quote size={12} style={{ display: 'inline', marginRight: '4px', opacity: 0.6 }} />
-                      {src.content}
-                    </div>
+                  return (
+                    <div key={idx} className="reference-item">
+                      <div className="reference-row" onClick={() => toggleSourceExpand(idx)}>
+                        <div className="reference-meta">
+                          <span className="reference-index">[{idx + 1}]</span>
+                          <span className="reference-icon">
+                            {src.source_type === 'url' ? <Globe size={13} /> : <FileText size={13} />}
+                          </span>
+                          <span className="reference-title">{src.source_title}</span>
+                          {src.source_url && (
+                            <a
+                              href={src.source_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="reference-link"
+                              onClick={(e) => e.stopPropagation()}
+                              title="Open original page"
+                            >
+                              <ExternalLink size={12} />
+                            </a>
+                          )}
+                        </div>
 
-                    {src.source_url && (
-                      <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {src.source_url}
+                        <div className="reference-actions">
+                          <span className="score-badge" title="Vector similarity score">
+                            {scorePct}% match
+                          </span>
+                          <button
+                            type="button"
+                            className="expand-btn"
+                            title={isExpanded ? "Collapse excerpt" : "Expand excerpt"}
+                          >
+                            {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                          </button>
+                        </div>
                       </div>
-                    )}
-                  </div>
-                ))}
+
+                      {/* Expandable Excerpt Drawer */}
+                      {isExpanded && (
+                        <div className="reference-excerpt">
+                          <div className="excerpt-label">
+                            <Quote size={12} /> Excerpt used by RAG pipeline:
+                          </div>
+                          <p className="excerpt-content">{src.content}</p>
+                          {src.source_url && (
+                            <div className="excerpt-url">
+                              Source URL: <a href={src.source_url} target="_blank" rel="noreferrer">{src.source_url}</a>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

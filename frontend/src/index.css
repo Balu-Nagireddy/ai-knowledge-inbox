@@ -528,12 +528,12 @@ body {
 
 /* Answer Card */
 .answer-panel {
-  background: linear-gradient(180deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.8) 100%);
-  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: linear-gradient(180deg, rgba(26, 35, 54, 0.85) 0%, rgba(15, 23, 42, 0.95) 100%);
+  border: 1px solid rgba(99, 102, 241, 0.3);
   border-radius: var(--radius-lg);
-  padding: 24px;
+  padding: 26px;
   margin-top: 14px;
-  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 12px 35px -10px rgba(0, 0, 0, 0.7);
   animation: fadeIn 0.3s ease-out;
 }
 
@@ -546,71 +546,216 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
   border-bottom: 1px solid var(--card-border);
-  padding-bottom: 12px;
+  padding-bottom: 14px;
 }
 
 .answer-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   color: #818cf8;
   font-weight: 700;
-  font-size: 0.85rem;
+  font-size: 0.88rem;
 }
 
-.answer-body {
+/* Markdown Answer Body - ChatGPT / Gemini style */
+.markdown-answer-body {
   font-size: 0.98rem;
-  line-height: 1.7;
+  line-height: 1.75;
   color: #f1f5f9;
-  white-space: pre-wrap;
   margin-bottom: 24px;
 }
 
-/* Sources Section */
-.sources-section {
-  border-top: 1px solid var(--card-border);
-  padding-top: 18px;
+.markdown-answer-body p {
+  margin-bottom: 14px;
 }
 
-.sources-title {
+.markdown-answer-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-answer-body h1, 
+.markdown-answer-body h2, 
+.markdown-answer-body h3 {
+  color: #ffffff;
+  font-weight: 700;
+  margin-top: 20px;
+  margin-bottom: 10px;
+}
+
+.markdown-answer-body h2 {
+  font-size: 1.18rem;
+}
+
+.markdown-answer-body h3 {
+  font-size: 1.05rem;
+}
+
+.markdown-answer-body ul, 
+.markdown-answer-body ol {
+  margin-left: 22px;
+  margin-bottom: 16px;
+}
+
+.markdown-answer-body li {
+  margin-bottom: 6px;
+}
+
+.markdown-answer-body strong {
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.markdown-answer-body code {
+  font-family: 'JetBrains Mono', monospace;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.86rem;
+  color: #a5b4fc;
+}
+
+.markdown-answer-body pre {
+  background: rgba(0, 0, 0, 0.45);
+  padding: 14px;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  margin: 14px 0;
+  border: 1px solid var(--card-border);
+}
+
+.markdown-answer-body pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.markdown-answer-body blockquote {
+  border-left: 3px solid var(--accent-primary);
+  padding-left: 14px;
+  color: var(--text-muted);
+  margin: 14px 0;
+  font-style: italic;
+}
+
+/* Typing Cursor */
+.typing-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 16px;
+  background-color: var(--accent-primary);
+  margin-left: 4px;
+  vertical-align: middle;
+  animation: blink 0.8s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* References Footer (Perplexity / Gemini style) */
+.references-footer {
+  border-top: 1px solid var(--card-border);
+  padding-top: 20px;
+  margin-top: 20px;
+}
+
+.references-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 0.82rem;
   font-weight: 700;
   text-transform: uppercase;
-  color: var(--text-dim);
   letter-spacing: 0.05em;
+  color: var(--text-dim);
   margin-bottom: 14px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
-.source-cards-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-}
-
-.source-card {
-  background: var(--bg-secondary);
-  border: 1px solid var(--card-border);
-  border-radius: var(--radius-md);
-  padding: 14px;
+.references-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
-.source-card-header {
+.reference-item {
+  background: rgba(16, 22, 35, 0.7);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  transition: all 0.2s ease;
+  overflow: hidden;
+}
+
+.reference-item:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+  background: rgba(22, 31, 49, 0.85);
+}
+
+.reference-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 0.75rem;
+  padding: 12px 16px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.reference-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.reference-index {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--accent-primary);
+  background: rgba(99, 102, 241, 0.12);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.reference-icon {
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+}
+
+.reference-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+
+.reference-link {
+  color: var(--accent-secondary);
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 4px;
+  transition: color 0.15s;
+}
+
+.reference-link:hover {
+  color: #ffffff;
+}
+
+.reference-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .score-badge {
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 9999px;
   font-weight: 700;
   font-family: 'JetBrains Mono', monospace;
@@ -620,25 +765,52 @@ body {
   border: 1px solid rgba(16, 185, 129, 0.25);
 }
 
-.source-card-title {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--text-main);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.expand-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.source-card-content {
-  font-size: 0.78rem;
+.reference-excerpt {
+  background: rgba(0, 0, 0, 0.3);
+  border-top: 1px solid var(--card-border);
+  padding: 14px 16px;
+  font-size: 0.82rem;
   color: var(--text-muted);
-  line-height: 1.45;
-  background: rgba(0, 0, 0, 0.25);
-  padding: 8px 10px;
-  border-radius: 6px;
-  max-height: 120px;
-  overflow-y: auto;
+  line-height: 1.5;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.excerpt-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.excerpt-content {
+  white-space: pre-wrap;
   font-family: inherit;
+}
+
+.excerpt-url {
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.excerpt-url a {
+  color: var(--accent-secondary);
+  text-decoration: underline;
 }
 
 /* Spinner */

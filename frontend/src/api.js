@@ -67,3 +67,69 @@ export async function queryKnowledge(question, topK = 4) {
 
   return await res.json();
 }
+
+export async function queryKnowledgeStream(question, topK = 4, { onSources, onToken, onDone, onError }) {
+  try {
+    const response = await fetch(`${API_BASE}/query/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: question.trim(), top_k: topK }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(err.detail || "Streaming query failed");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split("\n\n");
+      buffer = blocks.pop() || "";
+
+      for (const block of blocks) {
+        if (!block.trim()) continue;
+        const lines = block.split("\n");
+        let eventType = "message";
+        let dataStr = "";
+
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            eventType = line.replace("event: ", "").trim();
+          } else if (line.startsWith("data: ")) {
+            dataStr = line.replace("data: ", "").trim();
+          }
+        }
+
+        if (eventType === "sources") {
+          try {
+            const sources = JSON.parse(dataStr);
+            if (onSources) onSources(sources);
+          } catch (e) {
+            console.error("Failed to parse sources event:", e);
+          }
+        } else if (eventType === "token") {
+          try {
+            const token = JSON.parse(dataStr);
+            if (onToken) onToken(token);
+          } catch {
+            if (onToken) onToken(dataStr);
+          }
+        } else if (eventType === "done") {
+          if (onDone) onDone();
+        }
+      }
+    }
+
+    if (onDone) onDone();
+  } catch (err) {
+    if (onError) onError(err);
+    else throw err;
+  }
+}

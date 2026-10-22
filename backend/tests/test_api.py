@@ -39,8 +39,7 @@ def test_ingest_note_and_query_flow():
     assert res_query.status_code == 200
     query_data = res_query.json()
     assert query_data["question"] == query_payload["question"]
-    assert len(query_data["sources"]) >= 1
-    assert "Quantum Computing Basics" in query_data["sources"][0]["source_title"]
+    assert any(s["item_id"] == item_id for s in query_data["sources"])
 
     # 4. Clean up
     res_del = client.delete(f"/items/{item_id}")
@@ -56,3 +55,8 @@ def test_ingest_validation_errors():
     bad_url = {"source_type": "url", "url": "ftp://not-supported"}
     res2 = client.post("/ingest", json=bad_url)
     assert res2.status_code == 422
+
+def test_query_stream_endpoint():
+    res = client.post("/query/stream", json={"question": "What is in my inbox?", "top_k": 2})
+    assert res.status_code == 200
+    assert "text/event-stream" in res.headers["content-type"]

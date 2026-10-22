@@ -5,6 +5,17 @@ export default function Header({ health }) {
   const isOnline = health?.status === "healthy";
   const isGeminiActive = health?.gemini_api_configured;
 
+  // Format model name cleanly: e.g. "gemini-3.8-flash" -> "Gemini 3.8 Flash"
+  const formatModelName = (modelKey) => {
+    if (!modelKey) return "Gemini Live";
+    return modelKey
+      .split(/[-_]/)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+  };
+
+  const activeModelDisplay = formatModelName(health?.models?.llm);
+
   return (
     <header className="app-header">
       <div className="brand">
@@ -13,7 +24,7 @@ export default function Header({ health }) {
         </div>
         <div>
           <h1 className="brand-title">AI Knowledge Inbox</h1>
-          <p className="brand-subtitle">Minimal Production RAG Engine & Knowledge Store</p>
+          <p className="brand-subtitle">Production Minimal RAG Engine & Knowledge Store</p>
         </div>
       </div>
 
@@ -24,13 +35,16 @@ export default function Header({ health }) {
         </div>
 
         {isOnline && (
-          <div className="status-badge" style={{
-            background: isGeminiActive ? 'rgba(99, 102, 241, 0.12)' : 'rgba(245, 158, 11, 0.12)',
-            color: isGeminiActive ? '#a5b4fc' : '#fbbf24',
-            borderColor: isGeminiActive ? 'rgba(99, 102, 241, 0.3)' : 'rgba(245, 158, 11, 0.3)'
-          }}>
+          <div
+            className="status-badge"
+            style={{
+              background: isGeminiActive ? 'rgba(99, 102, 241, 0.15)' : 'rgba(245, 158, 11, 0.15)',
+              color: isGeminiActive ? '#a5b4fc' : '#fbbf24',
+              borderColor: isGeminiActive ? 'rgba(99, 102, 241, 0.35)' : 'rgba(245, 158, 11, 0.35)',
+            }}
+          >
             <Sparkles size={14} />
-            <span>{isGeminiActive ? 'Gemini 2.0 Live' : 'Demo Mode (Mock Emb)'}</span>
+            <span>{isGeminiActive ? `${activeModelDisplay} Live` : 'Demo Mode (Mock Emb)'}</span>
           </div>
         )}
       </div>

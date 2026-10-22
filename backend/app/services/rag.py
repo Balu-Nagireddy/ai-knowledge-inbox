@@ -1,5 +1,8 @@
+import json
+import time
 import uuid
-from typing import Dict, Any, List, Optional
+import asyncio
+from typing import Dict, Any, List, Optional, AsyncGenerator
 from app.config import settings
 from app.logging_config import logger
 from app.database import (
@@ -69,8 +72,8 @@ async def ingest_content(
 
 def build_rag_prompt(question: str, context_chunks: List[Dict[str, Any]]) -> str:
     """
-    Construct a grounded RAG prompt instructing the LLM to strictly rely on context
-    and explicitly cite source titles and URLs.
+    Construct a grounded RAG prompt instructing the LLM to format answers nicely with markdown,
+    cite sources cleanly with brackets [1], [2], and avoid hallucinations.
     """
     formatted_context = []
     for idx, chunk in enumerate(context_chunks, 1):
@@ -78,34 +81,32 @@ def build_rag_prompt(question: str, context_chunks: List[Dict[str, Any]]) -> str
         if chunk.get('source_url'):
             source_ref += f" ({chunk['source_url']})"
         formatted_context.append(
-            f"[Source {idx}: {source_ref}]\n{chunk['content']}"
+            f"[[{idx}]] Source: {source_ref}\nExcerpt:\n{chunk['content']}"
         )
     
     context_str = "\n\n---\n\n".join(formatted_context)
 
-    prompt = f"""You are a helpful Knowledge Assistant. Answer the user's question using ONLY the provided context snippets from their Knowledge Inbox.
+    prompt = f"""You are an advanced AI Knowledge Assistant.
+Answer the user's question accurately, concisely, and thoroughly based ONLY on the context excerpts provided below from their Knowledge Inbox.
 
-Guidelines:
-1. Answer the question accurately, concisely, and directly.
-2. Explicitly cite your sources using bracket notation like [Source 1] or mentioning the source title.
-3. If the provided context does not contain enough information to answer the question truthfully, state: "Based on your saved knowledge inbox, I don't have enough information to answer this question." Do not make up facts.
+Instructions:
+1. Format your response cleanly using Markdown (use bolding, bullet points, headers, or concise paragraphs as appropriate).
+2. Ground your claims by citing the corresponding source numbers in brackets (e.g. [[1]], [[2]]) when stating specific facts.
+3. If the context excerpts do not contain sufficient information to answer the question truthfully, state:
+"Based on the items currently saved in your Knowledge Inbox, there is not enough information to answer this question." Do not fabricate information.
 
-Context Snippets:
+=== Context Excerpts ===
 {context_str}
 
-User Question:
+=== User Question ===
 {question}
 
-Answer:"""
+=== Grounded Response ==="""
     return prompt
 
 async def execute_rag_query(question: str, top_k: int = 4) -> Dict[str, Any]:
     """
-    Execute semantic retrieval and LLM answer generation:
-    1. Embed query
-    2. Retrieve top-k relevant chunks from SQLite via cosine similarity
-    3. Generate grounded answer with Gemini LLM
-    4. Return answer + cited source snippets
+    Execute semantic retrieval and LLM answer generation with retry resilience.
     """
     logger.info(f"Executing RAG query: '{question}' (top_k={top_k})")
     
@@ -131,30 +132,84 @@ async def execute_rag_query(question: str, top_k: int = 4) -> Dict[str, Any]:
     client = get_genai_client()
     
     if client:
-        try:
-            rag_prompt = build_rag_prompt(question, top_chunks)
-            logger.info(f"Invoking Gemini model {settings.LLM_MODEL} for answer generation.")
-            response = client.models.generate_content(
-                model=settings.LLM_MODEL,
-                contents=rag_prompt
-            )
-            answer_text = response.text.strip() if response.text else "Unable to generate an answer."
-        except Exception as exc:
-            logger.error(f"Error calling Gemini LLM: {exc}")
-            answer_text = (
-                f"Encountered an issue communicating with the Gemini LLM ({str(exc)}). "
-                "Here are the most relevant excerpts retrieved from your inbox:"
-            )
+        rag_prompt = build_rag_prompt(question, top_chunks)
+        answer_text = None
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Invoking Gemini model {settings.LLM_MODEL} (attempt {attempt+1}/{max_retries})...")
+                response = client.models.generate_content(
+                    model=settings.LLM_MODEL,
+                    contents=rag_prompt
+                )
+                if response and response.text:
+                    answer_text = response.text.strip()
+                    break
+            except Exception as exc:
+                logger.warning(f"Gemini LLM call attempt {attempt+1} failed: {exc}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                else:
+                    logger.error(f"All {max_retries} attempts to call Gemini LLM failed.")
+                    answer_text = (
+                        f"Unable to reach the Gemini LLM after retrying ({str(exc)}). "
+                        "Below are the most relevant excerpts retrieved from your inbox."
+                    )
     else:
-        # Fallback response for offline/mock mode
         answer_text = (
             "*(Demo mode: GEMINI_API_KEY is not configured or in preview)*\n\n"
             f"Retrieved {len(top_chunks)} relevant knowledge snippet(s) matching your query from your inbox. "
-            "Configure a valid GEMINI_API_KEY in backend/.env to enable live LLM generation!"
+            "Configure a valid GEMINI_API_KEY in `backend/.env` to enable live LLM generation!"
         )
 
     return {
         "question": question,
-        "answer": answer_text,
+        "answer": answer_text or "Unable to synthesize answer.",
         "sources": top_chunks
     }
+
+async def stream_rag_query(question: str, top_k: int = 4) -> AsyncGenerator[str, None]:
+    """
+    Generator yielding Server-Sent Events (SSE) for real-time streaming answer delivery.
+    """
+    all_chunks = get_all_chunks()
+    if not all_chunks:
+        yield f"event: sources\ndata: {json.dumps([])}\n\n"
+        yield f"event: token\ndata: {json.dumps('Your Knowledge Inbox is currently empty. Add notes or URLs first to ask questions!')}\n\n"
+        yield "event: done\ndata: [DONE]\n\n"
+        return
+
+    query_emb = generate_query_embedding(question)
+    top_chunks = rank_chunks_by_similarity(query_emb, all_chunks, top_k=top_k)
+
+    # First emit retrieved sources
+    yield f"event: sources\ndata: {json.dumps(top_chunks)}\n\n"
+
+    client = get_genai_client()
+    if not client:
+        fallback_msg = (
+            "*(Demo mode: GEMINI_API_KEY is not configured)*\n\n"
+            f"Retrieved {len(top_chunks)} relevant knowledge snippet(s) matching your query from your inbox. "
+            "Configure a valid GEMINI_API_KEY in `backend/.env` to enable live LLM generation!"
+        )
+        for word in fallback_msg.split(" "):
+            yield f"event: token\ndata: {json.dumps(word + ' ')}\n\n"
+            await asyncio.sleep(0.04)
+        yield "event: done\ndata: [DONE]\n\n"
+        return
+
+    rag_prompt = build_rag_prompt(question, top_chunks)
+    try:
+        response_stream = client.models.generate_content_stream(
+            model=settings.LLM_MODEL,
+            contents=rag_prompt
+        )
+        for chunk in response_stream:
+            if chunk.text:
+                yield f"event: token\ndata: {json.dumps(chunk.text)}\n\n"
+    except Exception as exc:
+        logger.error(f"Streaming error from Gemini: {exc}")
+        yield f"event: token\ndata: {json.dumps(f'Error during streaming: {str(exc)}')}\n\n"
+
+    yield "event: done\ndata: [DONE]\n\n"

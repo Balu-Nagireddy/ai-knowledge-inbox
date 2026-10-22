@@ -2,14 +2,14 @@ from contextlib import asynccontextmanager
 from typing import List
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import settings
 from app.logging_config import setup_logging, logger
 from app.database import init_db, get_items, delete_item
 from app.schemas import IngestRequest, IngestResponse, ItemResponse, QueryRequest, QueryResponse
 from app.services.ingest import IngestionError
-from app.services.rag import ingest_content, execute_rag_query
+from app.services.rag import ingest_content, execute_rag_query, stream_rag_query
 
 # Initialize logging
 setup_logging()
@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AI Knowledge Inbox API",
     description="Production-style minimal RAG backend for ingesting notes/URLs and answering semantic queries.",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan
 )
 
@@ -124,8 +124,7 @@ async def remove_item(item_id: str):
 @app.post("/query", response_model=QueryResponse, tags=["RAG"])
 async def query(payload: QueryRequest):
     """
-    Execute semantic search over saved content and synthesize a grounded answer using Gemini LLM.
-    Returns the answer with cited source snippets.
+    Standard synchronous query endpoint returning synthesized answer and cited sources.
     """
     logger.info(f"Received user query: '{payload.question}'")
     try:
@@ -134,3 +133,14 @@ async def query(payload: QueryRequest):
     except Exception as exc:
         logger.error(f"Query endpoint error: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to process query: {str(exc)}")
+
+@app.post("/query/stream", tags=["RAG"])
+async def query_stream(payload: QueryRequest):
+    """
+    Streaming query endpoint delivering tokens in real-time via Server-Sent Events (SSE).
+    """
+    logger.info(f"Received streaming query: '{payload.question}'")
+    return StreamingResponse(
+        stream_rag_query(question=payload.question, top_k=payload.top_k or 4),
+        media_type="text/event-stream"
+    )
