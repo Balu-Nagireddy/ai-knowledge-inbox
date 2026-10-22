@@ -42,6 +42,41 @@ export async function ingestItem({ sourceType, content, url, title }) {
   return await res.json();
 }
 
+export async function uploadFileItem({ file, title }) {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (title && title.trim()) {
+    formData.append("title", title.trim());
+  }
+
+  const res = await fetch(`${API_BASE}/ingest/file`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || "Failed to upload and ingest file");
+  }
+
+  return await res.json();
+}
+
+export async function searchWebAndAnswer(question) {
+  const res = await fetch(`${API_BASE}/query/web-search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question: question.trim() }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || "Web search query failed");
+  }
+
+  return await res.json();
+}
+
 export async function deleteItem(id) {
   const res = await fetch(`${API_BASE}/items/${id}`, {
     method: "DELETE",

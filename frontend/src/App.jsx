@@ -64,7 +64,7 @@ export default function App() {
         </section>
 
         <section className="right-column">
-          <AskKnowledge itemsCount={items.length} />
+          <AskKnowledge itemsCount={items.length} onWebItemIngested={loadItems} />
         </section>
       </main>
     </div>

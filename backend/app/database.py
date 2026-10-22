@@ -29,7 +29,7 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS items (
                 id TEXT PRIMARY KEY,
-                source_type TEXT NOT NULL CHECK(source_type IN ('note', 'url')),
+                source_type TEXT NOT NULL CHECK(source_type IN ('note', 'url', 'file')),
                 source_url TEXT,
                 title TEXT NOT NULL,
                 raw_content TEXT NOT NULL,
@@ -54,7 +54,31 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_chunks_item_id ON chunks(item_id);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_items_created_at ON items(created_at DESC);")
         
-        conn.commit()
+        # Test if 'file' type is accepted by current table schema, migrate if needed
+        try:
+            cursor.execute("INSERT INTO items (id, source_type, title, raw_content, created_at) VALUES ('__probe__', 'file', 'probe', 'probe', 'probe');")
+            cursor.execute("DELETE FROM items WHERE id = '__probe__';")
+            conn.commit()
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            cursor.execute("PRAGMA foreign_keys = OFF;")
+            cursor.execute("""
+                CREATE TABLE items_new (
+                    id TEXT PRIMARY KEY,
+                    source_type TEXT NOT NULL CHECK(source_type IN ('note', 'url', 'file')),
+                    source_url TEXT,
+                    title TEXT NOT NULL,
+                    raw_content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+            """)
+            cursor.execute("INSERT INTO items_new SELECT * FROM items;")
+            cursor.execute("DROP TABLE items;")
+            cursor.execute("ALTER TABLE items_new RENAME TO items;")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_items_created_at ON items(created_at DESC);")
+            cursor.execute("PRAGMA foreign_keys = ON;")
+            conn.commit()
+            logger.info("Migrated items table schema to support 'file' type.")
     logger.info("Database schema initialized successfully.")
 
 def save_item_with_chunks(

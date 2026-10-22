@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database, FileText, Globe, Trash2, ExternalLink, RefreshCw, Layers } from 'lucide-react';
+import { Database, FileText, Globe, UploadCloud, Trash2, ExternalLink, RefreshCw, Layers } from 'lucide-react';
 
 export default function KnowledgeInbox({ items, loading, onRefresh, onDeleteItem }) {
   const formatDate = (isoString) => {
@@ -49,7 +49,13 @@ export default function KnowledgeInbox({ items, loading, onRefresh, onDeleteItem
             <div key={item.id} className="item-card">
               <div className="item-header">
                 <span className={`item-badge ${item.source_type}`}>
-                  {item.source_type === 'url' ? <Globe size={11} /> : <FileText size={11} />}
+                  {item.source_type === 'url' ? (
+                    <Globe size={11} />
+                  ) : item.source_type === 'file' ? (
+                    <UploadCloud size={11} />
+                  ) : (
+                    <FileText size={11} />
+                  )}
                   {item.source_type}
                 </span>
 

@@ -10,7 +10,13 @@ from app.database import (
     get_all_chunks,
     get_items
 )
-from app.services.ingest import process_note_content, fetch_url_content, IngestionError
+from app.services.ingest import (
+    process_note_content,
+    fetch_url_content,
+    process_file_content,
+    search_and_fetch_web,
+    IngestionError
+)
 from app.services.chunker import chunk_content
 from app.services.embeddings import (
     generate_embeddings,
@@ -19,18 +25,24 @@ from app.services.embeddings import (
     get_genai_client
 )
 
+# Resilient model failover hierarchy
+MODEL_FALLBACK_LIST = [
+    settings.LLM_MODEL,
+    "gemini-2.5-flash",
+    "gemini-1.5-flash",
+    "gemini-2.0-flash"
+]
+
 async def ingest_content(
     source_type: str,
     content: Optional[str] = None,
     url: Optional[str] = None,
-    custom_title: Optional[str] = None
+    custom_title: Optional[str] = None,
+    file_bytes: Optional[bytes] = None,
+    filename: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Orchestrate full ingestion workflow:
-    1. Extract & clean content based on source_type (note or url)
-    2. Chunk content recursively with semantic boundary preservation and overlap
-    3. Generate vector embeddings for all chunks (Gemini text-embedding-004)
-    4. Transactionally persist item and chunks in SQLite
+    Orchestrate full ingestion workflow for notes, URLs, or uploaded files.
     """
     logger.info(f"Starting ingestion: source_type={source_type}")
     
@@ -42,6 +54,11 @@ async def ingest_content(
             raise IngestionError("URL is required for 'url' source_type.", status_code=400)
         title, clean_text = await fetch_url_content(url, custom_title)
         source_url = url
+    elif source_type == "file":
+        if not file_bytes or not filename:
+            raise IngestionError("File content and filename are required for 'file' source_type.", status_code=400)
+        title, clean_text = process_file_content(file_bytes, filename, custom_title)
+        source_url = filename
     else:
         raise IngestionError(f"Unsupported source_type '{source_type}'.", status_code=400)
 
@@ -73,7 +90,7 @@ async def ingest_content(
 def build_rag_prompt(question: str, context_chunks: List[Dict[str, Any]]) -> str:
     """
     Construct a grounded RAG prompt instructing the LLM to format answers nicely with markdown,
-    cite sources cleanly with brackets [1], [2], and avoid hallucinations.
+    cite sources cleanly with brackets [1], [2], and detect when saved inbox lacks enough information.
     """
     formatted_context = []
     for idx, chunk in enumerate(context_chunks, 1):
@@ -93,7 +110,8 @@ Instructions:
 1. Format your response cleanly using Markdown (use bolding, bullet points, headers, or concise paragraphs as appropriate).
 2. Ground your claims by citing the corresponding source numbers in brackets (e.g. [[1]], [[2]]) when stating specific facts.
 3. If the context excerpts do not contain sufficient information to answer the question truthfully, state:
-"Based on the items currently saved in your Knowledge Inbox, there is not enough information to answer this question." Do not fabricate information.
+"Based on the items currently saved in your Knowledge Inbox, there is not enough information to answer this question."
+Do not fabricate information.
 
 === Context Excerpts ===
 {context_str}
@@ -106,7 +124,7 @@ Instructions:
 
 async def execute_rag_query(question: str, top_k: int = 4) -> Dict[str, Any]:
     """
-    Execute semantic retrieval and LLM answer generation with retry resilience.
+    Execute semantic retrieval and LLM answer generation with multi-model failover.
     """
     logger.info(f"Executing RAG query: '{question}' (top_k={top_k})")
     
@@ -114,8 +132,9 @@ async def execute_rag_query(question: str, top_k: int = 4) -> Dict[str, Any]:
     if not all_chunks:
         return {
             "question": question,
-            "answer": "Your Knowledge Inbox is currently empty. Add notes or URLs first to ask questions!",
-            "sources": []
+            "answer": "Your Knowledge Inbox is currently empty. Add notes, files, or URLs first to ask questions!",
+            "sources": [],
+            "needs_web_search": True
         }
 
     # Embed query and rank
@@ -126,36 +145,38 @@ async def execute_rag_query(question: str, top_k: int = 4) -> Dict[str, Any]:
         return {
             "question": question,
             "answer": "No relevant content was found in your Knowledge Inbox for this query.",
-            "sources": []
+            "sources": [],
+            "needs_web_search": True
         }
 
     client = get_genai_client()
+    answer_text = None
     
     if client:
         rag_prompt = build_rag_prompt(question, top_chunks)
-        answer_text = None
-        max_retries = 3
+        
+        # Multi-model retry & failover
+        models_to_try = []
+        for m in [settings.LLM_MODEL, "gemini-2.5-flash", "gemini-1.5-flash"]:
+            if m and m not in models_to_try:
+                models_to_try.append(m)
 
-        for attempt in range(max_retries):
+        for model_name in models_to_try:
             try:
-                logger.info(f"Invoking Gemini model {settings.LLM_MODEL} (attempt {attempt+1}/{max_retries})...")
+                logger.info(f"Invoking Gemini model '{model_name}'...")
                 response = client.models.generate_content(
-                    model=settings.LLM_MODEL,
+                    model=model_name,
                     contents=rag_prompt
                 )
                 if response and response.text:
                     answer_text = response.text.strip()
                     break
             except Exception as exc:
-                logger.warning(f"Gemini LLM call attempt {attempt+1} failed: {exc}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1.5 * (attempt + 1))
-                else:
-                    logger.error(f"All {max_retries} attempts to call Gemini LLM failed.")
-                    answer_text = (
-                        f"Unable to reach the Gemini LLM after retrying ({str(exc)}). "
-                        "Below are the most relevant excerpts retrieved from your inbox."
-                    )
+                logger.warning(f"Model '{model_name}' call failed: {exc}. Trying next fallback...")
+                await asyncio.sleep(1.0)
+                
+        if not answer_text:
+            answer_text = "Encountered a temporary issue communicating with the AI service. Please try again."
     else:
         answer_text = (
             "*(Demo mode: GEMINI_API_KEY is not configured or in preview)*\n\n"
@@ -163,20 +184,27 @@ async def execute_rag_query(question: str, top_k: int = 4) -> Dict[str, Any]:
             "Configure a valid GEMINI_API_KEY in `backend/.env` to enable live LLM generation!"
         )
 
+    # Detect if answer indicates insufficient knowledge
+    needs_web = False
+    lower_ans = (answer_text or "").lower()
+    if "not enough information" in lower_ans or "doesn't contain" in lower_ans or "inbox is currently empty" in lower_ans:
+        needs_web = True
+
     return {
         "question": question,
         "answer": answer_text or "Unable to synthesize answer.",
-        "sources": top_chunks
+        "sources": top_chunks,
+        "needs_web_search": needs_web
     }
 
 async def stream_rag_query(question: str, top_k: int = 4) -> AsyncGenerator[str, None]:
     """
-    Generator yielding Server-Sent Events (SSE) for real-time streaming answer delivery.
+    Generator yielding Server-Sent Events (SSE) for real-time streaming answer delivery with failover.
     """
     all_chunks = get_all_chunks()
     if not all_chunks:
         yield f"event: sources\ndata: {json.dumps([])}\n\n"
-        yield f"event: token\ndata: {json.dumps('Your Knowledge Inbox is currently empty. Add notes or URLs first to ask questions!')}\n\n"
+        yield f"event: token\ndata: {json.dumps('Your Knowledge Inbox is currently empty. Add notes, files, or URLs first to ask questions!')}\n\n"
         yield "event: done\ndata: [DONE]\n\n"
         return
 
@@ -200,16 +228,57 @@ async def stream_rag_query(question: str, top_k: int = 4) -> AsyncGenerator[str,
         return
 
     rag_prompt = build_rag_prompt(question, top_chunks)
-    try:
-        response_stream = client.models.generate_content_stream(
-            model=settings.LLM_MODEL,
-            contents=rag_prompt
-        )
-        for chunk in response_stream:
-            if chunk.text:
-                yield f"event: token\ndata: {json.dumps(chunk.text)}\n\n"
-    except Exception as exc:
-        logger.error(f"Streaming error from Gemini: {exc}")
-        yield f"event: token\ndata: {json.dumps(f'Error during streaming: {str(exc)}')}\n\n"
+    stream_success = False
+
+    models_to_try = []
+    for m in [settings.LLM_MODEL, "gemini-2.5-flash", "gemini-1.5-flash"]:
+        if m and m not in models_to_try:
+            models_to_try.append(m)
+
+    for model_name in models_to_try:
+        try:
+            logger.info(f"Streaming with Gemini model '{model_name}'...")
+            response_stream = client.models.generate_content_stream(
+                model=model_name,
+                contents=rag_prompt
+            )
+            for chunk in response_stream:
+                if chunk.text:
+                    yield f"event: token\ndata: {json.dumps(chunk.text)}\n\n"
+            stream_success = True
+            break
+        except Exception as exc:
+            logger.warning(f"Streaming with '{model_name}' failed: {exc}. Trying fallback...")
+            await asyncio.sleep(0.8)
+
+    if not stream_success:
+        yield f"event: token\ndata: {json.dumps('Unable to complete streaming with AI models. Please retry.')}\n\n"
 
     yield "event: done\ndata: [DONE]\n\n"
+
+async def web_search_ingest_and_answer(question: str) -> Dict[str, Any]:
+    """
+    Interactive web fallback:
+    1. Search the web for relevant content
+    2. Automatically ingest articles into Knowledge Inbox (chunks + embeds + SQLite)
+    3. Run RAG over the newly enriched knowledge base and synthesize the answer
+    """
+    logger.info(f"Executing web-search & ingest workflow for query: '{question}'")
+    articles = await search_and_fetch_web(question, max_results=2)
+    
+    newly_ingested = []
+    for art in articles:
+        try:
+            saved = await ingest_content(
+                source_type="url",
+                url=art["url"],
+                custom_title=art["title"]
+            )
+            newly_ingested.append(saved)
+        except Exception as exc:
+            logger.warning(f"Could not ingest web search article {art.get('url')}: {exc}")
+
+    # Now re-execute query over the updated inbox
+    result = await execute_rag_query(question=question, top_k=4)
+    result["newly_ingested_count"] = len(newly_ingested)
+    return result

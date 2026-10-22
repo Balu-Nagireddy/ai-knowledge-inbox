@@ -1,15 +1,43 @@
-import React, { useState } from 'react';
-import { PlusCircle, FileText, Globe, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
-import { ingestItem } from '../api';
+import React, { useState, useRef } from 'react';
+import { PlusCircle, FileText, Globe, UploadCloud, Loader2, AlertCircle, CheckCircle2, FileUp, X } from 'lucide-react';
+import { ingestItem, uploadFileItem } from '../api';
 
 export default function IngestBox({ onItemIngested }) {
-  const [sourceType, setSourceType] = useState('note'); // 'note' | 'url'
+  const [sourceType, setSourceType] = useState('note'); // 'note' | 'url' | 'file'
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [url, setUrl] = useState('');
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const handleFileChange = (e) => {
+    if (e.target.files && e.target.files[0]) {
+      setSelectedFile(e.target.files[0]);
+      setError(null);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      setSelectedFile(e.dataTransfer.files[0]);
+      setError(null);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -30,15 +58,31 @@ export default function IngestBox({ onItemIngested }) {
         return;
       }
     }
+    if (sourceType === 'file') {
+      if (!selectedFile) {
+        setError('Please choose a file to upload (.pdf, .docx, .md, .txt).');
+        return;
+      }
+    }
 
     try {
       setLoading(true);
-      const res = await ingestItem({
-        sourceType,
-        title,
-        content,
-        url,
-      });
+      let res;
+      if (sourceType === 'file') {
+        res = await uploadFileItem({
+          file: selectedFile,
+          title: title || selectedFile.name,
+        });
+        setSelectedFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      } else {
+        res = await ingestItem({
+          sourceType,
+          title,
+          content,
+          url,
+        });
+      }
 
       setSuccess(`Saved "${res.title}" and generated ${res.chunk_count} vector chunk(s).`);
       setTitle('');
@@ -78,6 +122,14 @@ export default function IngestBox({ onItemIngested }) {
           <Globe size={15} />
           Web URL
         </button>
+        <button
+          type="button"
+          className={`tab-btn ${sourceType === 'file' ? 'active' : ''}`}
+          onClick={() => { setSourceType('file'); setError(null); setSuccess(null); }}
+        >
+          <UploadCloud size={15} />
+          Upload File
+        </button>
       </div>
 
       {error && (
@@ -100,26 +152,34 @@ export default function IngestBox({ onItemIngested }) {
           <input
             type="text"
             className="text-input"
-            placeholder={sourceType === 'note' ? 'e.g. Distributed Systems Memo' : 'e.g. FastAPI Documentation'}
+            placeholder={
+              sourceType === 'note'
+                ? 'e.g. Distributed Systems Memo'
+                : sourceType === 'url'
+                ? 'e.g. FastAPI Documentation'
+                : 'e.g. DevOps Playbook (defaults to filename)'
+            }
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             disabled={loading}
           />
         </div>
 
-        {sourceType === 'note' ? (
+        {sourceType === 'note' && (
           <div className="form-group">
             <label className="input-label">Note Content *</label>
             <textarea
               className="textarea-input"
               rows={4}
-              placeholder="Paste or write thoughts, code patterns, meeting notes..."
+              placeholder="Paste or write thoughts, meeting notes, code snippets..."
               value={content}
               onChange={(e) => setContent(e.target.value)}
               disabled={loading}
             />
           </div>
-        ) : (
+        )}
+
+        {sourceType === 'url' && (
           <div className="form-group">
             <label className="input-label">Web URL *</label>
             <input
@@ -133,11 +193,63 @@ export default function IngestBox({ onItemIngested }) {
           </div>
         )}
 
+        {sourceType === 'file' && (
+          <div className="form-group">
+            <label className="input-label">Document File (.pdf, .docx, .md, .txt) *</label>
+            <div
+              className={`file-dropzone ${isDragging ? 'dragging' : ''} ${selectedFile ? 'has-file' : ''}`}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <input
+                type="file"
+                ref={fileInputRef}
+                style={{ display: 'none' }}
+                accept=".pdf,.docx,.doc,.md,.txt"
+                onChange={handleFileChange}
+              />
+
+              {selectedFile ? (
+                <div className="selected-file-pill">
+                  <FileUp size={18} color="var(--accent-secondary)" />
+                  <div className="file-info-text">
+                    <span className="file-name">{selectedFile.name}</span>
+                    <span className="file-size">{(selectedFile.size / 1024).toFixed(1)} KB</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="clear-file-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedFile(null);
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                    }}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ) : (
+                <div className="dropzone-prompt">
+                  <UploadCloud size={32} className="dropzone-icon" />
+                  <p className="dropzone-main-text">Click or drag & drop document here</p>
+                  <p className="dropzone-sub-text">Supports PDF, Word (.docx), Markdown (.md), and Text (.txt)</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <button type="submit" className="btn-primary" disabled={loading}>
           {loading ? (
             <>
               <Loader2 size={18} className="spinner" />
-              {sourceType === 'url' ? 'Fetching & Indexing...' : 'Chunking & Embedding...'}
+              {sourceType === 'file'
+                ? 'Parsing & Indexing File...'
+                : sourceType === 'url'
+                ? 'Fetching & Indexing...'
+                : 'Chunking & Embedding...'}
             </>
           ) : (
             <>

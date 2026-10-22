@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import {
   Sparkles,
@@ -13,23 +13,28 @@ import {
   ChevronUp,
   FileText,
   Globe,
-  Quote
+  UploadCloud,
+  Quote,
+  Compass,
+  ArrowRight
 } from 'lucide-react';
-import { queryKnowledgeStream, queryKnowledge } from '../api';
+import { queryKnowledgeStream, queryKnowledge, searchWebAndAnswer } from '../api';
 
-export default function AskKnowledge({ itemsCount }) {
+export default function AskKnowledge({ itemsCount, onWebItemIngested }) {
   const [question, setQuestion] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isWebSearching, setIsWebSearching] = useState(false);
   const [answerText, setAnswerText] = useState('');
   const [sources, setSources] = useState([]);
+  const [needsWebSearch, setNeedsWebSearch] = useState(false);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
   const [expandedSourceIdx, setExpandedSourceIdx] = useState(null);
 
   const sampleQuestions = [
     "What key concepts are covered in my notes?",
-    "Summarize the main takeaways from the saved content.",
-    "What are the best practices or architectural highlights mentioned?"
+    "What are the responsibilities of a DevOps Engineer?",
+    "Summarize the main takeaways from the saved content."
   ];
 
   const handleAsk = async (queryText) => {
@@ -40,27 +45,39 @@ export default function AskKnowledge({ itemsCount }) {
     setIsStreaming(true);
     setAnswerText('');
     setSources([]);
+    setNeedsWebSearch(false);
     setExpandedSourceIdx(null);
 
+    let accumulatedText = "";
+
     try {
-      // Use real-time streaming endpoint
       await queryKnowledgeStream(q, 4, {
         onSources: (retrievedSources) => {
           setSources(retrievedSources || []);
         },
         onToken: (token) => {
-          setAnswerText((prev) => prev + token);
+          accumulatedText += token;
+          setAnswerText(accumulatedText);
         },
         onDone: () => {
           setIsStreaming(false);
+          const lower = accumulatedText.toLowerCase();
+          if (
+            lower.includes("not enough information") ||
+            lower.includes("does not contain") ||
+            lower.includes("inbox is currently empty") ||
+            accumulatedText.length < 5
+          ) {
+            setNeedsWebSearch(true);
+          }
         },
         onError: async (err) => {
           console.warn('Streaming error, falling back to standard query:', err);
-          // Fallback to standard POST /query
           try {
             const data = await queryKnowledge(q, 4);
             setAnswerText(data.answer);
             setSources(data.sources || []);
+            setNeedsWebSearch(Boolean(data.needs_web_search));
           } catch (fallbackErr) {
             setError(fallbackErr.message || 'Failed to retrieve answer');
           } finally {
@@ -71,6 +88,27 @@ export default function AskKnowledge({ itemsCount }) {
     } catch (err) {
       setError(err.message || 'Failed to execute query');
       setIsStreaming(false);
+    }
+  };
+
+  const handleWebSearchAndIngest = async () => {
+    if (!question.trim()) return;
+    setIsWebSearching(true);
+    setError(null);
+
+    try {
+      const data = await searchWebAndAnswer(question.trim());
+      setAnswerText(data.answer);
+      setSources(data.sources || []);
+      setNeedsWebSearch(false);
+
+      if (onWebItemIngested) {
+        onWebItemIngested();
+      }
+    } catch (err) {
+      setError(err.message || 'Web search and ingestion failed');
+    } finally {
+      setIsWebSearching(false);
     }
   };
 
@@ -113,16 +151,16 @@ export default function AskKnowledge({ itemsCount }) {
             placeholder={
               itemsCount > 0
                 ? "Ask a question about your saved knowledge..."
-                : "Add notes or URLs above first, then ask anything..."
+                : "Add notes, URLs, or files above first, then ask anything..."
             }
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            disabled={isStreaming}
+            disabled={isStreaming || isWebSearching}
           />
           <button
             type="submit"
             className="btn-ask"
-            disabled={isStreaming || !question.trim()}
+            disabled={isStreaming || isWebSearching || !question.trim()}
           >
             {isStreaming ? <Loader2 size={18} className="spinner" /> : <Send size={18} />}
             <span>{isStreaming ? 'Thinking...' : 'Ask'}</span>
@@ -138,7 +176,7 @@ export default function AskKnowledge({ itemsCount }) {
             type="button"
             className="suggestion-pill"
             onClick={() => { setQuestion(sq); handleAsk(sq); }}
-            disabled={isStreaming}
+            disabled={isStreaming || isWebSearching}
           >
             "{sq}"
           </button>
@@ -146,7 +184,7 @@ export default function AskKnowledge({ itemsCount }) {
       </div>
 
       {/* Answer & Clean References Footnotes View */}
-      {(answerText || isStreaming) && (
+      {(answerText || isStreaming || isWebSearching) && (
         <div className="answer-panel">
           <div className="answer-header">
             <span className="answer-badge">
@@ -154,7 +192,7 @@ export default function AskKnowledge({ itemsCount }) {
               Grounded AI Response
             </span>
 
-            {answerText && (
+            {answerText && !isStreaming && !isWebSearching && (
               <button
                 type="button"
                 className="suggestion-pill"
@@ -171,8 +209,45 @@ export default function AskKnowledge({ itemsCount }) {
           {/* Real-time Markdown Answer Body */}
           <div className="markdown-answer-body">
             <ReactMarkdown>{answerText}</ReactMarkdown>
-            {isStreaming && <span className="typing-cursor"></span>}
+            {(isStreaming || isWebSearching) && <span className="typing-cursor"></span>}
           </div>
+
+          {/* Interactive Web Fallback Banner if Inbox lacked enough info */}
+          {needsWebSearch && !isStreaming && (
+            <div className="web-fallback-prompt">
+              <div className="fallback-info">
+                <div className="fallback-icon-wrap">
+                  <Compass size={20} color="var(--accent-secondary)" />
+                </div>
+                <div>
+                  <h4 className="fallback-title">Expand Knowledge via Live Web Search?</h4>
+                  <p className="fallback-desc">
+                    Your saved items don't have enough details on this topic. With your permission, I can search the web, ingest relevant articles directly into your Knowledge Inbox, and answer with citations.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                className="btn-web-action"
+                onClick={handleWebSearchAndIngest}
+                disabled={isWebSearching}
+              >
+                {isWebSearching ? (
+                  <>
+                    <Loader2 size={16} className="spinner" />
+                    <span>Searching & Ingesting Web Articles...</span>
+                  </>
+                ) : (
+                  <>
+                    <Globe size={16} />
+                    <span>Search Web & Add to Knowledge Base</span>
+                    <ArrowRight size={14} />
+                  </>
+                )}
+              </button>
+            </div>
+          )}
 
           {/* References & Footnotes List */}
           {sources.length > 0 && !isStreaming && (
@@ -193,10 +268,16 @@ export default function AskKnowledge({ itemsCount }) {
                         <div className="reference-meta">
                           <span className="reference-index">[{idx + 1}]</span>
                           <span className="reference-icon">
-                            {src.source_type === 'url' ? <Globe size={13} /> : <FileText size={13} />}
+                            {src.source_type === 'url' ? (
+                              <Globe size={13} />
+                            ) : src.source_type === 'file' ? (
+                              <UploadCloud size={13} />
+                            ) : (
+                              <FileText size={13} />
+                            )}
                           </span>
                           <span className="reference-title">{src.source_title}</span>
-                          {src.source_url && (
+                          {src.source_url && src.source_type === 'url' && (
                             <a
                               href={src.source_url}
                               target="_blank"
@@ -233,7 +314,7 @@ export default function AskKnowledge({ itemsCount }) {
                           <p className="excerpt-content">{src.content}</p>
                           {src.source_url && (
                             <div className="excerpt-url">
-                              Source URL: <a href={src.source_url} target="_blank" rel="noreferrer">{src.source_url}</a>
+                              Source: <span style={{ color: 'var(--text-main)' }}>{src.source_url}</span>
                             </div>
                           )}
                         </div>

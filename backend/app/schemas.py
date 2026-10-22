@@ -2,7 +2,7 @@ from typing import List, Optional, Literal
 from pydantic import BaseModel, Field, model_validator
 
 class IngestRequest(BaseModel):
-    source_type: Literal["note", "url"] = Field(..., description="Type of content: 'note' or 'url'")
+    source_type: Literal["note", "url", "file"] = Field(..., description="Type of content: 'note', 'url', or 'file'")
     content: Optional[str] = Field(None, description="Plain text note content (required if source_type is 'note')")
     url: Optional[str] = Field(None, description="Web page URL to fetch (required if source_type is 'url')")
     title: Optional[str] = Field(None, description="Optional custom title for the note or URL")
@@ -54,3 +54,7 @@ class QueryResponse(BaseModel):
     question: str
     answer: str
     sources: List[SourceSnippet]
+    needs_web_search: Optional[bool] = False
+
+class WebSearchRequest(BaseModel):
+    question: str = Field(..., min_length=2, max_length=2000, description="The query to search on the web and ingest")

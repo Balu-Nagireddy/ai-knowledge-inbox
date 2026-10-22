@@ -1,15 +1,15 @@
 from contextlib import asynccontextmanager
-from typing import List
-from fastapi import FastAPI, HTTPException, status
+from typing import List, Optional
+from fastapi import FastAPI, HTTPException, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import settings
 from app.logging_config import setup_logging, logger
 from app.database import init_db, get_items, delete_item
-from app.schemas import IngestRequest, IngestResponse, ItemResponse, QueryRequest, QueryResponse
+from app.schemas import IngestRequest, IngestResponse, ItemResponse, QueryRequest, QueryResponse, WebSearchRequest
 from app.services.ingest import IngestionError
-from app.services.rag import ingest_content, execute_rag_query, stream_rag_query
+from app.services.rag import ingest_content, execute_rag_query, stream_rag_query, web_search_ingest_and_answer
 
 # Initialize logging
 setup_logging()
@@ -97,9 +97,39 @@ async def ingest(payload: IngestRequest):
         )
     except IngestionError:
         raise
+@app.post("/ingest/file", response_model=IngestResponse, status_code=status.HTTP_201_CREATED, tags=["Ingestion"])
+async def ingest_file(
+    file: UploadFile = File(..., description="Uploaded document (PDF, Word, Markdown, Text)"),
+    title: Optional[str] = Form(None, description="Optional custom title")
+):
+    """
+    Ingest an uploaded document file:
+    - Extracts text from PDF, Word (.docx), Markdown (.md), or plain text (.txt)
+    - Generates chunks and embeddings
+    - Persists item and chunks in SQLite
+    """
+    logger.info(f"Received file upload: {file.filename}")
+    try:
+        file_bytes = await file.read()
+        saved_item = await ingest_content(
+            source_type="file",
+            file_bytes=file_bytes,
+            filename=file.filename,
+            custom_title=title
+        )
+        return IngestResponse(
+            id=saved_item["id"],
+            source_type=saved_item["source_type"],
+            title=saved_item["title"],
+            source_url=saved_item["source_url"],
+            chunk_count=saved_item["chunk_count"],
+            created_at=saved_item["created_at"]
+        )
+    except IngestionError:
+        raise
     except Exception as exc:
-        logger.error(f"Ingest endpoint error: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to ingest content: {str(exc)}")
+        logger.error(f"File ingestion error: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to ingest file: {str(exc)}")
 
 @app.get("/items", response_model=List[ItemResponse], tags=["Items"])
 async def list_items():
@@ -144,3 +174,19 @@ async def query_stream(payload: QueryRequest):
         stream_rag_query(question=payload.question, top_k=payload.top_k or 4),
         media_type="text/event-stream"
     )
+
+@app.post("/query/web-search", response_model=QueryResponse, tags=["RAG"])
+async def query_web_search(payload: WebSearchRequest):
+    """
+    Interactive web fallback:
+    Searches web for the question, fetches top articles, ingests them into Knowledge Inbox,
+    and returns a newly grounded answer with fresh citations.
+    """
+    logger.info(f"Triggered web search & ingest for question: '{payload.question}'")
+    try:
+        result = await web_search_ingest_and_answer(question=payload.question)
+        return QueryResponse(**result)
+    except Exception as exc:
+        logger.error(f"Web search ingest error: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Web search retrieval failed: {str(exc)}")
+

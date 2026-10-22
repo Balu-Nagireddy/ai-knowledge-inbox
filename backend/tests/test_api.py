@@ -60,3 +60,16 @@ def test_query_stream_endpoint():
     res = client.post("/query/stream", json={"question": "What is in my inbox?", "top_k": 2})
     assert res.status_code == 200
     assert "text/event-stream" in res.headers["content-type"]
+
+def test_ingest_file_endpoint():
+    file_content = b"# DevOps Guide\nContinuous Integration and Continuous Deployment are pillars of modern DevOps."
+    files = {"file": ("devops_guide.md", file_content, "text/markdown")}
+    res = client.post("/ingest/file", files=files, data={"title": "DevOps Guide MD"})
+    assert res.status_code == 201
+    data = res.json()
+    assert data["source_type"] == "file"
+    assert data["title"] == "DevOps Guide MD"
+    assert data["chunk_count"] >= 1
+    
+    # Clean up
+    client.delete(f"/items/{data['id']}")
