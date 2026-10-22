@@ -1,9 +1,40 @@
 import io
 import re
+import ipaddress
+import socket
+from urllib.parse import urlsplit
 import httpx
 from bs4 import BeautifulSoup
 from typing import Tuple, Optional, List, Dict
 from app.logging_config import logger
+
+def _validate_public_http_url(url: str) -> None:
+    """Reject malformed URLs and destinations that resolve to non-public IPs."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise IngestionError("URL must be an absolute HTTP or HTTPS URL.", status_code=400)
+        if parsed.username or parsed.password:
+            raise IngestionError("URLs containing embedded credentials are not allowed.", status_code=400)
+        if parsed.port and parsed.port not in {80, 443}:
+            raise IngestionError("Only standard HTTP/HTTPS ports are allowed.", status_code=400)
+
+        host = parsed.hostname.rstrip(".")
+        try:
+            literal_ip = ipaddress.ip_address(host)
+            addresses = [literal_ip]
+        except ValueError:
+            try:
+                records = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+                addresses = list({ipaddress.ip_address(record[4][0]) for record in records})
+            except (socket.gaierror, ValueError, OSError):
+                raise IngestionError("The URL host could not be resolved.", status_code=400)
+
+        if not addresses or any(not address.is_global for address in addresses):
+            raise IngestionError("URLs resolving to private or non-public network addresses are not allowed.", status_code=400)
+    except ValueError:
+        raise IngestionError("Invalid URL or port.", status_code=400)
+
 
 class IngestionError(Exception):
     """Custom exception raised when content ingestion fails."""
@@ -24,24 +55,34 @@ async def fetch_url_content(url: str, custom_title: Optional[str] = None) -> Tup
         "Accept-Language": "en-US,en;q=0.5"
     }
     
-    logger.info(f"Fetching URL: {url}")
+    logger.info("Fetching URL content")
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            response = await client.get(url, headers=headers)
-            if response.status_code != 200:
-                raise IngestionError(
-                    f"Failed to fetch URL. Server responded with status {response.status_code}",
-                    status_code=400
-                )
+        current_url = str(url)
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+            response = None
+            for redirect_count in range(6):
+                _validate_public_http_url(current_url)
+                response = await client.get(current_url, headers=headers)
+                if response.status_code not in {301, 302, 303, 307, 308}:
+                    break
+                location = response.headers.get("location")
+                if not location or redirect_count == 5:
+                    raise IngestionError("URL redirect limit exceeded or redirect target missing.", status_code=400)
+                current_url = str(response.url.join(location))
+            if response is None or response.status_code != 200:
+                code = response.status_code if response is not None else "unknown"
+                raise IngestionError(f"Failed to fetch URL. Server responded with status {code}", status_code=502)
+            if "text/html" not in response.headers.get("content-type", "").lower() and "application/xhtml+xml" not in response.headers.get("content-type", "").lower():
+                raise IngestionError("The target URL did not return an HTML document.", status_code=415)
             html_content = response.text
     except httpx.RequestError as exc:
-        logger.error(f"Network error fetching {url}: {exc}")
-        raise IngestionError(f"Network connection error while fetching URL: {str(exc)}", status_code=502)
+        logger.warning("Network error while fetching a URL: %s", exc)
+        raise IngestionError("Network connection error while fetching URL.", status_code=502)
     except IngestionError:
         raise
-    except Exception as exc:
-        logger.error(f"Unexpected error fetching {url}: {exc}")
-        raise IngestionError(f"Unexpected error fetching URL: {str(exc)}", status_code=500)
+    except Exception:
+        logger.exception("Unexpected URL extraction failure")
+        raise IngestionError("Unexpected error fetching URL.", status_code=500)
 
     # Clean HTML
     soup = BeautifulSoup(html_content, "html.parser")
