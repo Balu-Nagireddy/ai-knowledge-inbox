@@ -138,11 +138,10 @@ async def ingest_file(
             chunk_count=saved_item["chunk_count"],
             created_at=saved_item["created_at"]
         )
-    except IngestionError:
+    except (IngestionError, HTTPException):
         raise
     except Exception as exc:
-        logger.error(f"File ingestion error: {exc}", exc_info=True)
-        logger.error("File ingestion failed", exc_info=True)
+        logger.error("File ingestion failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to ingest file.")
 
 @app.post("/ingest/files", response_model=BatchIngestResponse, status_code=status.HTTP_201_CREATED, tags=["Ingestion"])
@@ -185,8 +184,9 @@ async def ingest_multiple_files(
             saved_items.append(resp)
             total_chunks += saved["chunk_count"]
         except Exception as exc:
-            logger.error(f"Failed to ingest batch file '{f.filename}': {exc}")
-            errors.append(f"{f.filename}: {str(exc)}")
+            logger.error("Failed to ingest batch file '%s': %s", f.filename, exc, exc_info=True)
+            # Do not return internal parser/network exception details to clients.
+            errors.append(f"{f.filename}: ingestion failed; check server logs for details.")
 
     if not saved_items and errors:
         raise HTTPException(status_code=422, detail="; ".join(errors))
