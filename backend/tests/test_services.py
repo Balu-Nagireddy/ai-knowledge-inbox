@@ -1,5 +1,5 @@
 import pytest
-from app.services.ingest import process_note_content, IngestionError
+from app.services.ingest import process_note_content, IngestionError, _validate_public_http_url
 from app.services.chunker import chunk_content, recursive_split_text
 from app.services.embeddings import (
     generate_embeddings,
@@ -72,3 +72,14 @@ def test_embeddings_and_cosine_similarity():
     assert len(ranked) == 2
     assert ranked[0]["chunk_id"] == "1"
     assert ranked[0]["similarity_score"] == 1.0
+
+
+def test_url_validation_rejects_private_and_non_http_targets():
+    with pytest.raises(IngestionError):
+        _validate_public_http_url("http://127.0.0.1/admin")
+    with pytest.raises(IngestionError):
+        _validate_public_http_url("http://192.168.1.10/")
+    with pytest.raises(IngestionError):
+        _validate_public_http_url("file:///etc/passwd")
+    with pytest.raises(IngestionError):
+        _validate_public_http_url("https://user:pass@example.com/")
