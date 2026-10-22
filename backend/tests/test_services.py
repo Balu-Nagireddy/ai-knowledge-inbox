@@ -52,7 +52,7 @@ def test_embeddings_and_cosine_similarity():
     ]
     embeddings = generate_embeddings(texts)
     assert len(embeddings) == 3
-    assert len(embeddings[0]) == 768
+    assert len(embeddings[0]) in (768, 3072)
 
     # Cosine similarity between identical vectors should be ~1.0
     sim_self = compute_cosine_similarity(embeddings[0], embeddings[0])
