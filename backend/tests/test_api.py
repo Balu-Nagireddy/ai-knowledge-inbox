@@ -90,3 +90,12 @@ def test_ingest_multiple_files_batch():
     for item in data["items"]:
         client.delete(f"/items/{item['id']}")
 
+
+
+def test_file_upload_size_limit():
+    oversized = b"x" * (10 * 1024 * 1024 + 1)
+    response = client.post(
+        "/ingest/file",
+        files={"file": ("large.txt", oversized, "text/plain")},
+    )
+    assert response.status_code == 413
