@@ -11,24 +11,11 @@ def get_db_path() -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     return db_path
 
-_db_initialized = False
-
 def get_connection() -> sqlite3.Connection:
-    global _db_initialized
+    """Open a connection. Schema creation is explicit via init_db() at app startup."""
     conn = sqlite3.connect(str(get_db_path()))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
-    if not _db_initialized:
-        # Quick check if tables exist, otherwise initialize
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='items';")
-        if not cursor.fetchone():
-            conn.close()
-            init_db()
-            conn = sqlite3.connect(str(get_db_path()))
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON;")
-        _db_initialized = True
     return conn
 
 def init_db():
