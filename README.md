@@ -166,7 +166,7 @@ The app goes beyond the minimum with file uploads, batch ingestion, SSE streamin
 
 ### Current readiness
 
-**Assignment scope: substantially implemented; validation is in progress.** The core feature set is present, and the current changes add safer CORS defaults, URL destination checks, compatible setup scripts, embedding-dimension handling, and CI. A successful local test/build run or passing GitHub Actions run is still required before claiming the repository is fully verified.
+**Assignment scope: substantially implemented; local validation remains.** The core feature set is present, and the current changes add configurable CORS, URL destination checks, compatible setup scripts, and embedding-dimension handling. Run the backend tests, frontend production build, and the main user flow locally before claiming the repository is fully verified.
 
 ## Requirements
 
